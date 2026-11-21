@@ -1,6 +1,6 @@
 
 // config.js — Faz B: taxonomy filter_info eklendi
-// ✅ FAZ H: filter_info.family_propaganda eklendi; taxonomy sayıları: 76 alt tür / 150 klişe / 75 tema.
+// ✅ FAZ H: filter_info.family_propaganda eklendi; taxonomy sayıları düzeltildi (76/155/75).
 import { safeJSON } from "./db.js";
 import { invalidatePromptCache } from "./llm.js";
 
@@ -309,7 +309,7 @@ Bir motifin filmde YALNIZCA BİR KEZ geçmesi otomatik olarak o klişenin bulund
 - hero_turns_villain: İyi karakterin kötüye dönüşmesi.
 - bittersweet_ending: Mutlu sonun bozulması (narrative_form).
 - open_ended_ending: Açık uçlu final (narrative_form).
-Tam liste 150 kavramdır. Tema ile karıştırılmamalıdır: tema düşünsel meseledir, trope anlatı aracıdır.
+Tam liste 155 kavramdır. Tema ile karıştırılmamalıdır: tema düşünsel meseledir, trope anlatı aracıdır.
 ${TWO_STAGE_NOTE}`,
 
   "filter_info.themes": `[YZ bağlamı]
@@ -375,14 +375,41 @@ export async function getAllStaticOptions(env) {
   } catch { return {}; }
 }
 export async function getMovieLists(env, movieIds) {
-  if (!env.DB || !movieIds.length) return new Map();
+  if (!env.DB || !Array.isArray(movieIds) || movieIds.length === 0) return new Map();
+
+  // SQLite/Turso bağlantılarında tek sorgudaki bind parametresi sayısı sınırlıdır.
+  // Araştırma akışında büyük film grupları gelebileceğinden ID'leri güvenli
+  // büyüklükte parçalara ayırıyoruz. Tekrarlanan/boş ID'ler sorguya sokulmaz.
+  const ids = [...new Set(movieIds
+    .filter(id => id !== null && id !== undefined)
+    .map(id => String(id).trim())
+    .filter(Boolean))];
+  if (!ids.length) return new Map();
+
+  const byId = new Map();
+  const chunkSize = 400;
+
   try {
-    const placeholders = movieIds.map(() => "?").join(",");
-    const { results } = await env.DB.prepare(`SELECT movie_id, list_name, position FROM movie_lists WHERE movie_id IN (${placeholders})`).bind(...movieIds).all();
-    const byId = new Map();
-    for (const r of results || []) { if (!byId.has(r.movie_id)) byId.set(r.movie_id, []); byId.get(r.movie_id).push({ name: r.list_name, position: r.position }); }
+    for (let offset = 0; offset < ids.length; offset += chunkSize) {
+      const chunk = ids.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "?").join(",");
+      const { results } = await env.DB.prepare(
+        `SELECT movie_id, list_name, position
+         FROM movie_lists
+         WHERE movie_id IN (${placeholders})`
+      ).bind(...chunk).all();
+
+      for (const r of results || []) {
+        if (!byId.has(r.movie_id)) byId.set(r.movie_id, []);
+        byId.get(r.movie_id).push({ name: r.list_name, position: r.position });
+      }
+    }
     return byId;
-  } catch { return new Map(); }
+  } catch (e) {
+    console.warn("movie lists read:", e?.message || e);
+    // Eksik/yarım listeyi geçerli sonuç gibi sunmamak için hata halinde boş Map.
+    return new Map();
+  }
 }
 export async function setConfig(env, key, value) {
   if (!env.DB) throw new Error("DB yok");
@@ -391,4 +418,4 @@ export async function setConfig(env, key, value) {
     `INSERT INTO app_config (key, value, updated_at) VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
   ).bind(key, value, Math.floor(Date.now() / 1000)).run();
-}
+  }
