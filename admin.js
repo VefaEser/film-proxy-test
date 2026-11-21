@@ -208,3 +208,421 @@ if (path === "/bulk/task" && request.method === "POST") {
     }
 
     const taskId =
+              "task_" + Date.now() + "_" +
+        Math.random().toString(36).slice(2, 8);
+
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    await env.DB.prepare(`
+        INSERT INTO admin_tasks (
+            id, admin_user_id, task_type, target, list_type,
+            status, total, done, failed, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'pending', 0, 0, 0, ?, ?)
+    `).bind(
+        taskId,
+        sess.user_id,
+        taskType,
+        target || null,
+        listType || null,
+        timestamp,
+        timestamp
+    ).run();
+
+    return jsonRes({ ok: true, taskId });
+}
+
+if (path.startsWith("/bulk/task/") && request.method === "GET") {
+    const taskId = decodeURIComponent(
+        path.replace("/bulk/task/", "")
+    );
+
+    const row = await env.DB.prepare(`
+        SELECT * FROM admin_tasks
+        WHERE id = ? AND admin_user_id = ?
+    `).bind(taskId, sess.user_id).first();
+
+    if (!row) {
+        return jsonErr("Görev bulunamadı", 404);
+    }
+
+    return jsonRes({ ok: true, task: row });
+}
+
+if (path === "/bulk/tasks" && request.method === "GET") {
+    const { results } = await env.DB.prepare(`
+        SELECT * FROM admin_tasks
+        WHERE admin_user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 50
+    `).bind(sess.user_id).all();
+
+    return jsonRes({
+        ok: true,
+        tasks: results || []
+    });
+}
+
+if (path === "/bulk/task/cancel" && request.method === "POST") {
+    let body;
+    try {
+        body = await request.json();
+    } catch {
+        return jsonErr("Geçersiz JSON", 400);
+    }
+
+    const taskId = String(body.taskId || "").trim();
+
+    if (!taskId) {
+        return jsonErr("taskId gerekli", 400);
+    }
+
+    await env.DB.prepare(`
+        UPDATE admin_tasks
+        SET status = 'cancelled', updated_at = ?
+        WHERE id = ?
+          AND admin_user_id = ?
+          AND status IN ('pending', 'running')
+    `).bind(
+        Math.floor(Date.now() / 1000),
+        taskId,
+        sess.user_id
+    ).run();
+
+    return jsonRes({ ok: true });
+}
+
+if (path === "/bulk/run" && request.method === "POST") {
+    let body;
+    try {
+        body = await request.json();
+    } catch {
+        return jsonErr("Geçersiz JSON", 400);
+    }
+
+    const taskId = String(body.taskId || "").trim();
+
+    if (!taskId) {
+        return jsonErr("taskId gerekli", 400);
+    }
+
+    const task = await env.DB.prepare(`
+        SELECT * FROM admin_tasks
+        WHERE id = ? AND admin_user_id = ?
+    `).bind(taskId, sess.user_id).first();
+
+    if (!task) {
+        return jsonErr("Görev bulunamadı", 404);
+    }
+
+    if (task.status !== "pending") {
+        return jsonErr("Görev zaten başlatılmış", 409);
+    }
+
+    const started = await env.DB.prepare(`
+        UPDATE admin_tasks
+        SET status = 'running', updated_at = ?
+        WHERE id = ?
+          AND admin_user_id = ?
+          AND status = 'pending'
+    `).bind(
+        Math.floor(Date.now() / 1000),
+        taskId,
+        sess.user_id
+    ).run();
+
+    if (Number(started?.meta?.changes ?? 1) === 0) {
+        return jsonErr("Görev başka bir işlem tarafından başlatılmış", 409);
+    }
+
+    const runTask = async () => {
+        let done = 0;
+        let failed = 0;
+
+        const now = () => Math.floor(Date.now() / 1000);
+
+        const checkCancel = async () => {
+            const row = await env.DB.prepare(`
+                SELECT status FROM admin_tasks WHERE id = ?
+            `).bind(taskId).first();
+
+            return row?.status === "cancelled";
+        };
+
+        const saveProgress = async () => {
+            await env.DB.prepare(`
+                UPDATE admin_tasks
+                SET done = ?, failed = ?, updated_at = ?
+                WHERE id = ?
+            `).bind(done, failed, now(), taskId).run();
+        };
+
+        try {
+            if (
+                task.task_type === "refresh_cards" ||
+                task.task_type === "create_cards"
+            ) {
+                const { results } = await env.DB.prepare(`
+                    SELECT movie_id
+                    FROM movie_profiles
+                    ORDER BY movie_id
+                    LIMIT 200
+                `).all();
+
+                const { handleMovieDetails } =
+                    await import("./research.js");
+
+                for (const row of results || []) {
+                    if (await checkCancel()) break;
+
+                    try {
+                        const movie = {
+                            id: parseInt(row.movie_id, 10) || row.movie_id
+                        };
+
+                        await handleMovieDetails(
+                            env,
+                            { movie, forceAll: true },
+                            null
+                        );
+
+                        done++;
+                    } catch (e) {
+                        failed++;
+                        console.error(
+                            "[bulk refresh card]",
+                            row.movie_id,
+                            e.message
+                        );
+                    }
+
+                    await saveProgress();
+                }
+
+            } else if (task.task_type === "delete_list") {
+                const targetUser = parseInt(task.target, 10);
+
+                if (!Number.isSafeInteger(targetUser) || targetUser <= 0) {
+                    throw new Error("Geçersiz target user_id");
+                }
+
+                const listType = task.list_type || "watched";
+
+                const result = await env.DB.prepare(`
+                    DELETE FROM user_movies
+                    WHERE user_id = ? AND list_type = ?
+                `).bind(targetUser, listType).run();
+
+                done = Number(result?.meta?.changes ?? 0);
+                await saveProgress();
+
+            } else if (task.task_type === "delete_cards") {
+                const ids = JSON.parse(task.target || "[]");
+                              if (!Array.isArray(ids)) {
+                    throw new Error("Film ID listesi geçersiz");
+                }
+
+                for (const id of ids) {
+                    if (await checkCancel()) break;
+
+                    try {
+                        await env.DB.prepare(`
+                            DELETE FROM movie_profiles
+                            WHERE movie_id = ?
+                        `).bind(String(id)).run();
+
+                        done++;
+                    } catch (e) {
+                        failed++;
+                        console.error("[bulk delete card]", id, e.message);
+                    }
+
+                    await saveProgress();
+                }
+            }
+
+            const current = await env.DB.prepare(`
+                SELECT status FROM admin_tasks WHERE id = ?
+            `).bind(taskId).first();
+
+            const finalStatus =
+                current?.status === "cancelled"
+                    ? "cancelled"
+                    : "completed";
+
+            await env.DB.prepare(`
+                UPDATE admin_tasks
+                SET status = ?,
+                    done = ?,
+                    failed = ?,
+                    finished_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+            `).bind(
+                finalStatus,
+                done,
+                failed,
+                now(),
+                now(),
+                taskId
+            ).run();
+
+        } catch (e) {
+            console.error("[bulk task failed]", taskId, e);
+
+            await env.DB.prepare(`
+                UPDATE admin_tasks
+                SET status = 'failed',
+                    error_log = ?,
+                    updated_at = ?
+                WHERE id = ?
+            `).bind(
+                String(e.message || e).slice(0, 500),
+                now(),
+                taskId
+            ).run();
+        }
+    };
+
+    if (ctx?.waitUntil) {
+        ctx.waitUntil(runTask());
+    } else {
+        await runTask();
+    }
+
+    return jsonRes({
+        ok: true,
+        taskId,
+        message: "Görev başlatıldı."
+    });
+}
+
+// ============================================================
+// TURSO TOPLU GÖREVLERİ SONU
+// ============================================================
+
+
+if (path === "/hf-import/file/start" && request.method === "POST") {
+      let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
+      const fileHash = String(body.fileHash || "").toLowerCase();
+      const totalRows = Number(body.totalRows);
+      if (!/^[a-f0-9]{64}$/.test(fileHash)) return jsonErr("Dosya parmak izi geçersiz", 400);
+      if (!Number.isSafeInteger(totalRows) || totalRows < 1 || totalRows > 500000) return jsonErr("CSV satır sayısı geçersiz (1–500.000)", 400);
+      const dataset = String(body.fileName || "admin-upload.csv").slice(0, 255);
+      const nowTs = now();
+      const id = `acsv_${sess.user_id}_${fileHash.slice(0, 20)}`;
+      await env.DB.prepare(`INSERT OR IGNORE INTO csv_import_sessions
+        (id, owner_type, owner_id, list_type, file_hash, file_name, source_dataset, source_revision, total_rows, next_row, chunk_size, status, created_at, updated_at)
+        VALUES (?, 'admin', ?, '', ?, ?, ?, ?, ?, 0, 100, 'pending', ?, ?)`)
+        .bind(id, sess.user_id, fileHash, dataset, dataset, String(body.sourceRevision || "").slice(0, 120) || null, totalRows, nowTs, nowTs).run();
+      let session = await env.DB.prepare("SELECT * FROM csv_import_sessions WHERE owner_type='admin' AND owner_id=? AND list_type='' AND file_hash=?")
+        .bind(sess.user_id, fileHash).first();
+      if (!session) return jsonErr("Aktarım kaydı oluşturulamadı", 500);
+      if (Number(session.total_rows) !== totalRows) return jsonErr("Aynı dosya parmak izi farklı satır sayısıyla geldi", 409);
+      if (["cancelled", "failed"].includes(session.status)) return jsonErr("Bu aktarım iptal edilmiş veya hata almış", 409);
+      if (session.status !== "completed") {
+        await env.DB.prepare("UPDATE csv_import_sessions SET status='running', updated_at=? WHERE id=? AND status IN ('pending','stopped','running')")
+          .bind(nowTs, session.id).run();
+        session = await env.DB.prepare("SELECT * FROM csv_import_sessions WHERE id=?").bind(session.id).first();
+      }
+      return jsonRes({ ok: true, session, nextRow: session.next_row, status: session.status });
+    }
+    if (path === "/hf-import/file/chunk" && request.method === "POST") {
+      let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
+      const sessionId = String(body.sessionId || "");
+      const chunkIndex = Number(body.chunkIndex), startRow = Number(body.startRow);
+      const rows = Array.isArray(body.rows) ? body.rows : [];
+      if (!sessionId || !Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || !Number.isSafeInteger(startRow) || startRow < 0 || !rows.length || rows.length > 100) return jsonErr("CSV parçası geçersiz (en fazla 100 satır)", 400);
+      const session = await env.DB.prepare("SELECT * FROM csv_import_sessions WHERE id=? AND owner_type='admin' AND owner_id=?")
+        .bind(sessionId, sess.user_id).first();
+      if (!session) return jsonErr("Aktarım kaydı bulunamadı", 404);
+      const prior = await env.DB.prepare("SELECT result_json FROM csv_import_session_chunks WHERE session_id=? AND chunk_index=?")
+        .bind(sessionId, chunkIndex).first();
+      if (prior) return jsonRes({ ok: true, ...safeJSON(prior.result_json, {}), duplicate: true, session: await env.DB.prepare("SELECT * FROM csv_import_sessions WHERE id=?").bind(sessionId).first() });
+      if (session.status !== "running") return jsonErr(`Aktarım durumu ${session.status}; önce devam ettirin.`, 409);
+      if (startRow !== Number(session.next_row)) return jsonErr(`Sıra uyuşmazlığı: beklenen ${session.next_row}, gelen ${startRow}`, 409);
+      if (startRow + rows.length > Number(session.total_rows)) return jsonErr("Parça toplam satır sayısını aşıyor", 400);
+      const nowTs = now(), endRow = startRow + rows.length;
+      const result = await _upsertGlobalRows(env, rows, session.source_dataset || session.file_name || "admin-upload.csv", session.source_revision, counts => [
+        env.DB.prepare(`INSERT INTO csv_import_session_chunks (session_id, chunk_index, start_row, end_row, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+          .bind(sessionId, chunkIndex, startRow, endRow, JSON.stringify(counts), nowTs),
+        env.DB.prepare(`UPDATE csv_import_sessions SET next_row=?, inserted_rows=inserted_rows+?, status=?, updated_at=?, finished_at=? WHERE id=? AND status='running'`)
+          .bind(endRow, counts.inserted, endRow >= Number(session.total_rows) ? "completed" : "running", nowTs, endRow >= Number(session.total_rows) ? nowTs : null, sessionId)
+      ]);
+      const updated = await env.DB.prepare("SELECT * FROM csv_import_sessions WHERE id=?").bind(sessionId).first();
+      return jsonRes({ ok: true, ...result, nextRow: updated.next_row, totalRows: updated.total_rows, status: updated.status, session: updated });
+    }
+    if (path === "/hf-import/file/stop" && request.method === "POST") {
+      let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
+      const id = String(body.sessionId || "");
+      const r = await env.DB.prepare("UPDATE csv_import_sessions SET status='stopped', updated_at=? WHERE id=? AND owner_type='admin' AND owner_id=? AND status='running'")
+        .bind(now(), id, sess.user_id).run();
+      if (!r.meta?.changes) return jsonErr("Çalışan aktarım bulunamadı", 409);
+      return jsonRes({ ok: true, status: "stopped" });
+    }
+    if (path === "/hf-import/file/cancel" && request.method === "POST") {
+      let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
+      const id = String(body.sessionId || "");
+      await env.DB.prepare("UPDATE csv_import_sessions SET status='cancelled', updated_at=?, finished_at=? WHERE id=? AND owner_type='admin' AND owner_id=? AND status IN ('pending','stopped','running')")
+        .bind(now(), now(), id, sess.user_id).run();
+      return jsonRes({ ok: true, status: "cancelled" });
+    }
+    if (path === "/hf-import/file/status" && request.method === "GET") {
+      const id = String(url.searchParams.get("id") || "");
+      if (!id) return jsonErr("id gerekli", 400);
+      const session = await env.DB.prepare("SELECT * FROM csv_import_sessions WHERE id=? AND owner_type='admin' AND owner_id=?").bind(id, sess.user_id).first();
+      if (!session) return jsonErr("Aktarım bulunamadı", 404);
+      return jsonRes({ ok: true, session });
+    }
+
+    if (path === "/hf-import/start" && request.method === "POST") {
+      let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
+      const sourceDataset = String(body.sourceDataset || "").trim();
+      if (!sourceDataset) return jsonErr("sourceDataset gerekli", 400);
+      const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const nowTs = now();
+      await env.DB.prepare(
+        `INSERT INTO import_jobs (id, admin_user_id, source_dataset, source_revision, source_total_rows, source_total_chunks, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+      ).bind(
+        jobId, sess.user_id, sourceDataset, String(body.sourceRevision || "").trim() || null,
+        Number.isFinite(parseInt(body.totalRows)) ? parseInt(body.totalRows) : null,
+        Number.isFinite(parseInt(body.totalChunks)) ? parseInt(body.totalChunks) : null,
+        nowTs, nowTs
+      ).run();
+      return jsonRes({ ok: true, jobId });
+    }
+    if (path === "/hf-import/chunk" && request.method === "POST") {
+      let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
+      const jobId = String(body.jobId || "").trim();
+      const rows = Array.isArray(body.rows) ? body.rows : [];
+      if (!jobId) return jsonErr("jobId gerekli", 400);
+      if (!rows.length) return jsonErr("rows boş", 400);
+      if (rows.length > 250) return jsonErr("Tek chunk en fazla 250 satır olabilir", 400);
+      const job = await env.DB.prepare("SELECT * FROM import_jobs WHERE id = ?").bind(jobId).first();
+      if (!job) return jsonErr("Import job bulunamadı", 404);
+      if (job.status === "completed" || job.status === "cancelled") return jsonErr("Bu job artık kapalı", 409);
+      const res = await _upsertGlobalRows(env, rows, job.source_dataset, job.source_revision);
+      const newCompleted = (job.completed_chunks || 0) + 1;
+      const status = job.source_total_chunks && newCompleted >= job.source_total_chunks ? "completed" : "running";
+      const finishedAt = status === "completed" ? now() : null;
+      await env.DB.prepare(
+        `UPDATE import_jobs SET completed_chunks = ?, inserted_rows = inserted_rows + ?, status = ?, updated_at = ?, finished_at = COALESCE(?, finished_at) WHERE id = ?`
+      ).bind(newCompleted, res.inserted, status, now(), finishedAt, jobId).run();
+      return jsonRes({ ok: true, jobId, completedChunks: newCompleted, insertedRows: res.inserted, status });
+    }
+    if (path === "/hf-import/status" && request.method === "GET") {
+      const jobId = String(url.searchParams.get("id") || "").trim();
+      if (!jobId && url.searchParams.get("list") === "1") {
+        const { results } = await env.DB.prepare("SELECT * FROM import_jobs ORDER BY created_at DESC LIMIT 20").all();
+        return jsonRes({ ok: true, jobs: results || [] });
+      }
+      if (!jobId) return jsonErr("id veya list=1 gerekli", 400);
+      const job = await env.DB.prepare("SELECT * FROM import_jobs WHERE id = ?").bind(jobId).first();
+      if (!job) return jsonErr("Import job bulunamadı", 404);
+      return jsonRes({ ok: true, job });
+    }
+
+    return jsonErr("Admin route bulunamadı", 404);
+  } catch (e) { return jsonErr(e.message, e.status || 500); }
+        } 
