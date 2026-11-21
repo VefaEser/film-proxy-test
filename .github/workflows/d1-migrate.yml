@@ -1,0 +1,28 @@
+
+# LEGACY / DISABLED
+# Film Keşif Motoru'nun güncel veritabanı Turso'dur.
+# Bu workflow eski Cloudflare D1 veritabanına migration uyguluyordu.
+# Yanlışlıkla çalıştırılarak canlı şemayı değiştirmemesi için job devre dışıdır.
+# Turso migration işlemleri için turso-migrate.yml kullanılmalıdır.
+
+name: Legacy D1 Migrations (Disabled)
+
+on:
+  workflow_dispatch:
+    inputs:
+      acknowledgement:
+        description: "Bu eski D1 workflow'u devre dışıdır; Turso için turso-migrate.yml kullanın."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  blocked:
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: D1 migration is disabled
+        run: echo "D1 migration disabled. Use the Turso Migration workflow."
