@@ -1,3 +1,4 @@
+
 // auth.js — Kayıt/giriş/şifre sıfırlama + güvenlik + permissions döndürme.
 // Faz 3: CORS temizlendi + askıya alınmış kullanıcı oturumu engellendi.
 // Faz 6: /auth/recover/start ve /auth/recover/verify enumeration düzeltmesi
@@ -33,8 +34,12 @@ function getCookie(req, name) {
   for (const part of cookie.split(";")) { const [k, ...v] = part.trim().split("="); if (k === name) return v.join("="); }
   return null;
 }
-function sessionCookieHeader(token, maxAge) { return `sid=${token}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${maxAge}`; }
-function clearSessionCookie() { return `sid=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`; }
+// Aynı Worker iki HF alan adına hizmet verdiği için test ve canlı oturum
+// çerezleri ayrı adlarla tutulur. IS_TEST_ENV, Worker tarafından isteğin
+// ortamına göre ayarlanmalıdır.
+function sessionCookieName(env) { return env?.IS_TEST_ENV === true ? "sid_test" : "sid"; }
+function sessionCookieHeader(token, maxAge, env) { return `${sessionCookieName(env)}=${token}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${maxAge}`; }
+function clearSessionCookie(env) { return `${sessionCookieName(env)}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`; }
 function isValidEmail(s) { return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(s || "").trim()); }
 
 // === FAZ 6: Deterministik fake sorular için sabit soru bankası ===
@@ -289,17 +294,17 @@ export async function handleAuth(request, env, ctx) {
       ok: true, userId: user.id, username: user.username, registerNumber: user.register_number,
       isAdmin: !!user.is_admin, isPublic: !!user.is_public, isApproved: !!user.is_approved, isEmailVerified: !!user.is_email_verified,
       permissions
-    }), { status: 200, headers: { ...CORS, "Content-Type": "application/json", "Set-Cookie": sessionCookieHeader(session.token, SESSION_TTL) } });
+    }), { status: 200, headers: { ...CORS, "Content-Type": "application/json", "Set-Cookie": sessionCookieHeader(session.token, SESSION_TTL, env) } });
   }
 
   if (path === "/logout" && request.method === "POST") {
-    const token = getCookie(request, "sid");
+    const token = getCookie(request, sessionCookieName(env));
     if (token) await deleteSession(env, token);
-    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json", "Set-Cookie": clearSessionCookie() } });
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { ...CORS, "Content-Type": "application/json", "Set-Cookie": clearSessionCookie(env) } });
   }
 
   if (path === "/me" && request.method === "GET") {
-    const token = getCookie(request, "sid");
+    const token = getCookie(request, sessionCookieName(env));
     const sess = await getSession(env, token);
     if (sess) {
       if (sess.is_suspended) return jsonRes({ ok: false, user: null, permissions: [] });
@@ -319,7 +324,7 @@ export async function handleAuth(request, env, ctx) {
           ok: true, userId: admin.id, username: admin.username, registerNumber: admin.register_number,
           isAdmin: true, isPublic: !!admin.is_public, isApproved: true, isEmailVerified: true,
           permissions: ["refresh_movie", "edit_suggestions_approve", "comment_approve", "user_manage", "field_unlock", "csv_import_cards", "view_private"]
-        }), { status: 200, headers: { ...CORS, "Content-Type": "application/json", "Set-Cookie": sessionCookieHeader(s.token, SESSION_TTL) } });
+        }), { status: 200, headers: { ...CORS, "Content-Type": "application/json", "Set-Cookie": sessionCookieHeader(s.token, SESSION_TTL, env) } });
       }
     }
     return jsonRes({ ok: false, user: null, permissions: [] });
@@ -428,7 +433,7 @@ export async function handleAuth(request, env, ctx) {
   }
 
   if (path === "/change-password" && request.method === "POST") {
-    const sess = await getSession(env, getCookie(request, "sid"));
+    const sess = await getSession(env, getCookie(request, sessionCookieName(env)));
     if (!sess) return jsonErr("Giriş gerekli", 401);
     if (sess.is_suspended) return jsonErr("Hesap askıya alınmış", 403);
     let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
@@ -448,7 +453,7 @@ export async function handleAuth(request, env, ctx) {
   }
 
   if (path === "/rename" && request.method === "POST") {
-    const sess = await getSession(env, getCookie(request, "sid"));
+    const sess = await getSession(env, getCookie(request, sessionCookieName(env)));
     if (!sess) return jsonErr("Giriş gerekli", 401);
     if (sess.is_suspended) return jsonErr("Hesap askıya alınmış", 403);
     let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
@@ -464,7 +469,7 @@ export async function handleAuth(request, env, ctx) {
 }
 
 export async function getCurrentUser(env, request) {
-  const token = getCookie(request, "sid");
+  const token = getCookie(request, sessionCookieName(env));
   return await getSession(env, token);
 }
 export async function getCurrentUserWithAdminBridge(env, request) {
