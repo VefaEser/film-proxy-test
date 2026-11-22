@@ -1,0 +1,19 @@
+{
+  "name": "film-proxy",
+  "main": "index.js",
+  "compatibility_date": "2026-10-14",
+  "keep_vars": true,
+  "placement": {
+    "mode": "smart"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "invocation_logs": true
+    }
+  },
+  "compatibility_flags": [
+    "nodejs_compat"
+  ]
+      }
