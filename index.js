@@ -15,13 +15,11 @@ import {
   tmdb, getSiteRatingForMovie
 } from "./worker-core.js";
 
-const TEST_ORIGIN =
-  "https://vefaeser-kestiktest.static.hf.space";
-
 const CORS = {
   "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type,Authorization"
 };
+
 async function requireAdminEither(env, request) {
   if (isAdmin(request, env)) return { via: "bearer" };
   const user = await getCurrentUserWithAdminBridge(env, request);
@@ -51,7 +49,6 @@ async function handleRequest(request, env, ctx) {
     path.startsWith("/user/") ||
     path.startsWith("/social/") ||
     (path.startsWith("/admin/") &&
-      path !== "/admin/ping" &&
       path !== "/admin/taxonomy/validate") ||
     path.startsWith("/movie/rating-stats/") ||
     path.startsWith("/movie/rating-users/") ||
@@ -63,10 +60,9 @@ async function handleRequest(request, env, ctx) {
     path === "/research" ||
     path === "/llm-interactions";
   if (dbRequired && !env.DB) {
-    return jsonError("Veritabanı bağlantısı kurulamadı.", 503);
+    return jsonError("Seçilen ortamın Turso veritabanına bağlanılamadı.", 503);
   }
   if (_u.pathname.startsWith("/auth/")) return await handleAuth(request, env, ctx);
-  // Kullanıcı CSV devam/iptal uçları /user/ altında handleUser'a yönlendirilir.
   if (_u.pathname.startsWith("/user/") ||
       _u.pathname.startsWith("/movie/rating-stats/") ||
       _u.pathname.startsWith("/movie/rating-users/") ||
@@ -75,7 +71,6 @@ async function handleRequest(request, env, ctx) {
     return await handleUser(request, env, ctx);
   }
   if (_u.pathname.startsWith("/social/")) return await handleSocial(request, env, ctx);
-  // Admin cihaz CSV aktarımı ve eski HF chunk uçları /admin/hf-import/ altında işlenir.
   if (_u.pathname.startsWith("/admin/bulk/") ||
       _u.pathname.startsWith("/admin/users") || _u.pathname.startsWith("/admin/comments") ||
       _u.pathname.startsWith("/admin/locks") || _u.pathname.startsWith("/admin/suggestions") ||
@@ -87,16 +82,6 @@ async function handleRequest(request, env, ctx) {
   try {
     if (url.pathname === "/health") {
       const keyHealth = (() => { try { return getKeyHealth(); } catch { return {}; } })();
-      let dbConnected = false;
-      let dbPingError = null;
-      if (env.DB) {
-        try {
-          const ping = await env.DB.prepare("SELECT 1 AS ok").first();
-          dbConnected = Number(ping?.ok) === 1;
-        } catch (e) {
-          dbPingError = String(e?.message || e).slice(0, 160);
-        }
-      }
       return response({
         ok: true,
         geminiModel: env.GEMINI_MODEL || GEMINI_MODEL_DEFAULT, geminiModels: buildGeminiChain(env),
@@ -109,29 +94,12 @@ async function handleRequest(request, env, ctx) {
         groqKeys: [!!env.GROQ_API_KEY_1, !!env.GROQ_API_KEY_2, !!env.GROQ_API_KEY_3],
         geminiKeys: [!!env.GEMINI_API_KEY_1, !!env.GEMINI_API_KEY_2, !!env.GEMINI_API_KEY_3],
         adminToken: !!env.ADMIN_TOKEN, metatake: true, filmmap: true, staticOptions: true,
-        db: !!(
-  (env.IS_TEST_ENV
-    ? env.TEST_TURSO_DATABASE_URL
-    : env.TURSO_DATABASE_URL)
-  &&
-  (env.IS_TEST_ENV
-    ? env.TEST_TURSO_AUTH_TOKEN
-    : env.TURSO_AUTH_TOKEN)
-),
-
-dbConfigured: !!(
-  (env.IS_TEST_ENV
-    ? env.TEST_TURSO_DATABASE_URL
-    : env.TURSO_DATABASE_URL)
-  &&
-  (env.IS_TEST_ENV
-    ? env.TEST_TURSO_AUTH_TOKEN
-    : env.TURSO_AUTH_TOKEN)
-),
-
-dbEnvironment: env.IS_TEST_ENV ? "test" : "live",
-        dbConnected,
-        dbPingError,
+        db: !!((env.IS_TEST_ENV ? env.TEST_TURSO_DATABASE_URL : env.TURSO_DATABASE_URL) &&
+               (env.IS_TEST_ENV ? env.TEST_TURSO_AUTH_TOKEN : env.TURSO_AUTH_TOKEN)),
+        dbConfigured: !!((env.IS_TEST_ENV ? env.TEST_TURSO_DATABASE_URL : env.TURSO_DATABASE_URL) &&
+                         (env.IS_TEST_ENV ? env.TEST_TURSO_AUTH_TOKEN : env.TURSO_AUTH_TOKEN)),
+        dbEnvironment: env.IS_TEST_ENV ? "test" : "live",
+        dbConnected: await (async () => { try { return Number((await env.DB.prepare("SELECT 1 AS ok").first())?.ok) === 1; } catch { return false; } })(),
         dbType: "turso", defaultMinImdbVotes: 100, keyHealth
       });
     }
@@ -163,39 +131,78 @@ dbEnvironment: env.IS_TEST_ENV ? "test" : "live",
     if (url.pathname === "/admin/filter_info" && request.method === "GET") return response({ config: await getFilterInfoAll(env) });
     if (url.pathname === "/admin/stats" && request.method === "GET") { const auth = await requireAdminEither(env, request); if (!auth) return jsonError("Yetkisiz.", 401); return response({ stats: await getLlmStats(env), deadKeys: await getActiveDeadKeys(env), keyHealth: (() => { try { return getKeyHealth(); } catch { return {}; } })() }); }
 
-    // Turso veritabanı tanılama. Eski /admin/d1-diag yolu geriye dönük uyumluluk için korunur.
-    if ((url.pathname === "/admin/db-diag" || url.pathname === "/admin/d1-diag") && request.method === "GET") {
+    // === FAZ G: /admin/d1-diag — anlık teşhis (yalnızca SELECT, D1 yazma kotası tüketmez) ===
+    if (url.pathname === "/admin/d1-diag" && request.method === "GET") {
       const auth = await requireAdminEither(env, request);
       if (!auth) return jsonError("Yetkisiz.", 401);
-      if (!env.DB) return jsonError("Turso veritabanı yapılandırılmamış.", 503);
-
-      const checkedAt = Math.floor(Date.now() / 1000);
-      const startedAt = Date.now();
-      try {
-        const row = await env.DB.prepare("SELECT 1 AS ok").first();
-        const connected = Number(row?.ok) === 1;
-        return response({
-          ok: connected,
-          via: auth.via,
-          db_type: "turso",
-          configured: !!env.TURSO_DATABASE_URL && !!env.TURSO_AUTH_TOKEN,
-          connected,
-          latency_ms: Date.now() - startedAt,
-          checked_at: checkedAt,
-          error: connected ? null : "SELECT 1 beklenen sonucu döndürmedi."
-        }, connected ? 200 : 503);
-      } catch (e) {
-        return response({
-          ok: false,
-          via: auth.via,
-          db_type: "turso",
-          configured: !!env.TURSO_DATABASE_URL && !!env.TURSO_AUTH_TOKEN,
-          connected: false,
-          latency_ms: Date.now() - startedAt,
-          checked_at: checkedAt,
-          error: String(e?.message || e).slice(0, 200)
-        }, 503);
+      if (!env.DB) return jsonError("D1 bağlantısı yok", 503);
+      const nowSec = Math.floor(Date.now() / 1000);
+      const windowSec = 24 * 3600;
+      const since = nowSec - windowSec;
+      const sqlWrites = {
+        llm_calls: "SELECT COUNT(*) AS c FROM llm_calls WHERE ts > ?",
+        llm_rpm_tracker: "SELECT COUNT(*) AS c FROM llm_rpm_tracker WHERE window_start > ?",
+        filter_verdicts: "SELECT COUNT(*) AS c FROM filter_verdicts WHERE created_at > ?",
+        movie_profiles: "SELECT COUNT(*) AS c FROM movie_profiles WHERE updated_at > ?",
+        movie_profile_fields: "SELECT COUNT(*) AS c FROM movie_profile_fields WHERE fetched_at > ?",
+        user_sessions: "SELECT COUNT(*) AS c FROM user_sessions WHERE created_at > ?",
+        users: "SELECT COUNT(*) AS c FROM users WHERE created_at > ?",
+        comments: "SELECT COUNT(*) AS c FROM comments WHERE created_at > ?",
+        edit_suggestions: "SELECT COUNT(*) AS c FROM edit_suggestions WHERE created_at > ?",
+        login_attempts: "SELECT COUNT(*) AS c FROM login_attempts WHERE last_attempt_ts > ?",
+        messages: "SELECT COUNT(*) AS c FROM messages WHERE created_at > ?",
+        csv_imports: "SELECT COUNT(*) AS c FROM csv_imports WHERE imported_at > ?"
+      };
+      const writes24h = {};
+      let total = 0;
+      const errors = {};
+      for (const [tbl, sql] of Object.entries(sqlWrites)) {
+        try {
+          const row = await env.DB.prepare(sql).bind(since).first();
+          const c = Number(row?.c || 0);
+          writes24h[tbl] = c;
+          total += c;
+        } catch (e) {
+          writes24h[tbl] = null;
+          errors[tbl] = String(e.message || e).slice(0, 120);
+        }
       }
+      let taxonomyFilterRows = null;
+      try {
+        const row = await env.DB.prepare(
+          `SELECT COUNT(*) AS c FROM filter_verdicts WHERE (filter_signature LIKE '%"subgenres"%' OR filter_signature LIKE '%"tropes"%' OR filter_signature LIKE '%"themes"%')`
+        ).first();
+        taxonomyFilterRows = Number(row?.c || 0);
+      } catch (e) { errors.taxonomy_filter_rows = String(e.message || e).slice(0, 120); }
+      const latest = {};
+      try { latest.llm_calls = (await env.DB.prepare("SELECT MAX(ts) AS m FROM llm_calls").first())?.m || null; } catch {}
+      try { latest.llm_rpm_tracker = (await env.DB.prepare("SELECT MAX(window_start) AS m FROM llm_rpm_tracker").first())?.m || null; } catch {}
+      try { latest.filter_verdicts = (await env.DB.prepare("SELECT MAX(created_at) AS m FROM filter_verdicts").first())?.m || null; } catch {}
+      try { latest.movie_profiles = (await env.DB.prepare("SELECT MAX(updated_at) AS m FROM movie_profiles").first())?.m || null; } catch {}
+      try { latest.movie_profile_fields = (await env.DB.prepare("SELECT MAX(fetched_at) AS m FROM movie_profile_fields").first())?.m || null; } catch {}
+      const D1_FREE_WRITE_LIMIT = 100000;
+      const warnings = [];
+      const threshold = D1_FREE_WRITE_LIMIT * 0.3;
+      if (writes24h.llm_calls != null && writes24h.llm_calls > threshold) warnings.push(`llm_calls son 24 saatte ${writes24h.llm_calls} yazma yaptı (limitin %${Math.round(writes24h.llm_calls / D1_FREE_WRITE_LIMIT * 100)}'i)`);
+      if (writes24h.llm_rpm_tracker != null && writes24h.llm_rpm_tracker > threshold) warnings.push(`llm_rpm_tracker son 24 saatte ${writes24h.llm_rpm_tracker} yazma yaptı (limitin %${Math.round(writes24h.llm_rpm_tracker / D1_FREE_WRITE_LIMIT * 100)}'i)`);
+      if (writes24h.filter_verdicts != null && writes24h.filter_verdicts > threshold) warnings.push(`filter_verdicts son 24 saatte ${writes24h.filter_verdicts} yazma yaptı (limitin %${Math.round(writes24h.filter_verdicts / D1_FREE_WRITE_LIMIT * 100)}'i)`);
+      if (writes24h.movie_profile_fields != null && writes24h.movie_profile_fields > threshold) warnings.push(`movie_profile_fields son 24 saatte ${writes24h.movie_profile_fields} yazma yaptı (limitin %${Math.round(writes24h.movie_profile_fields / D1_FREE_WRITE_LIMIT * 100)}'i)`);
+      if (total > D1_FREE_WRITE_LIMIT) warnings.push(`Toplam yazma (${total}) günlük limiti (${D1_FREE_WRITE_LIMIT}) aşmış görünüyor.`);
+      return response({
+        ok: true,
+        via: auth.via,
+        window_hours: 24,
+        since_ts: since,
+        now_ts: nowSec,
+        writes_24h: writes24h,
+        total_writes_24h: total,
+        taxonomy_filter_rows: taxonomyFilterRows,
+        latest_timestamps: latest,
+        hf_token_configured: !!env.HF_TOKEN,
+        d1_free_tier_write_limit: D1_FREE_WRITE_LIMIT,
+        warnings,
+        errors: Object.keys(errors).length ? errors : undefined
+      });
     }
 
     if (url.pathname === "/admin/dead_keys" && request.method === "DELETE") { const auth = await requireAdminEither(env, request); if (!auth) return jsonError("Yetkisiz.", 401); if (env.DB) await env.DB.prepare("DELETE FROM dead_keys").run(); deadKeysCache.ts = 0; return response({ ok: true }); }
@@ -307,57 +314,35 @@ dbEnvironment: env.IS_TEST_ENV ? "test" : "live",
   } catch (e) { console.error(e.stack || e); const message = String(e.message || e); const status = e.status || (/API_KEY|Secret .*tanımlı değil|gerekli/.test(message) ? 503 : 500); return jsonError(message, status); }
 }
 
-
 export default {
   async fetch(request, env, ctx) {
     let response;
-
-    const TEST_ORIGIN =
-      "https://vefaeser-kestiktest.static.hf.space";
-
+    const TEST_ORIGIN = "https://vefaeser-kestiktest.static.hf.space";
     const origin = request.headers.get("Origin") || "";
-
-    // Test ve canlı ortamı ayır.
     const useTestDatabase = origin === TEST_ORIGIN;
 
-    const appEnv = Object.assign({}, env, {
-      IS_TEST_ENV: useTestDatabase
-    });
+    // Origin yalnızca site/DB yönlendirmesi içindir; kimlik doğrulama yerine geçmez.
+    const appEnv = Object.assign({}, env, { IS_TEST_ENV: useTestDatabase });
 
-    // Doğru Turso veritabanına bağlan.
     try {
+      // Test kimlik bilgileri yoksa canlı DB'ye geri düşülmez.
       appEnv.DB = createTursoAdapter(env, useTestDatabase);
     } catch (e) {
       appEnv.DB = null;
-
-      console.error(
-        "[turso-adapter-init]",
-        useTestDatabase ? "TEST DB" : "LIVE DB",
-        e?.stack || e
-      );
+      console.error("[turso-adapter-init]", useTestDatabase ? "TEST DB" : "LIVE DB", e?.stack || e);
     }
 
-    // İsteği işle.
     try {
       response = await handleRequest(request, appEnv, ctx);
     } catch (e) {
       console.error("[fetch-fatal]", e?.stack || e);
-
-      response = jsonError(
-        "Sunucu isteği işlerken beklenmeyen bir hata oluştu.",
-        500
-      );
+      response = jsonError("Sunucu isteği işlerken beklenmeyen bir hata oluştu.", 500);
     }
 
-    // CORS başlıklarını düzenle.
     const newHeaders = new Headers(response.headers);
-
     newHeaders.delete("Access-Control-Allow-Origin");
     newHeaders.delete("Access-Control-Allow-Credentials");
-
-    for (const [k, v] of Object.entries(corsHeaders(request))) {
-      newHeaders.set(k, v);
-    }
+    for (const [k, v] of Object.entries(corsHeaders(request))) newHeaders.set(k, v);
 
     return new Response(response.body, {
       status: response.status,
