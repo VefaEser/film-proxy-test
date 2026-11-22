@@ -317,20 +317,18 @@ async function handleRequest(request, env, ctx) {
 export default {
   async fetch(request, env, ctx) {
     let response;
-    const TEST_ORIGIN = "https://vefaeser-kestiktest.static.hf.space";
-    const origin = request.headers.get("Origin") || "";
-    const useTestDatabase = origin === TEST_ORIGIN;
+// Bu Worker yalnızca test ortamında çalışır.
+// Origin başlığından bağımsız olarak daima test veritabanını kullanır.
+const appEnv = Object.assign({}, env, { IS_TEST_ENV: true });
 
-    // Origin yalnızca site/DB yönlendirmesi içindir; kimlik doğrulama yerine geçmez.
-    const appEnv = Object.assign({}, env, { IS_TEST_ENV: useTestDatabase });
-
-    try {
-      // Test kimlik bilgileri yoksa canlı DB'ye geri düşülmez.
-      appEnv.DB = createTursoAdapter(env, useTestDatabase);
-    } catch (e) {
-      appEnv.DB = null;
-      console.error("[turso-adapter-init]", useTestDatabase ? "TEST DB" : "LIVE DB", e?.stack || e);
-    }
+try {
+  // Yalnızca TEST_TURSO_DATABASE_URL ve TEST_TURSO_AUTH_TOKEN kullanılır.
+  // Test bilgileri eksikse canlı veritabanına geçiş yapılmaz.
+  appEnv.DB = createTursoAdapter(env, true);
+} catch (e) {
+  appEnv.DB = null;
+  console.error("[turso-adapter-init] TEST DB", e?.stack || e);
+}
 
     try {
       response = await handleRequest(request, appEnv, ctx);
