@@ -256,10 +256,12 @@ async function callGroq(env, key, model, prompt, maxOutputTokens, useSearch, out
   if (!Number.isFinite(requestedOutput) || requestedOutput < 1) {
     throw new Error("Groq için maxOutputTokens geçerli bir pozitif sayı olmalıdır.");
   }
-  if (availableOutput < 256) {
-    throw new Error(`Groq TPM bütçesi yetersiz: prompt yaklaşık ${promptTokens} token, toplam bütçe ${GROQ_TPM_BUDGET}.`);
+  // Prompt TPM bütçesinin tamamını tüketmişse sağlayıcıya istek gönderme.
+  // Kalan bütçe 1-255 token ise, istenen çıktı limitini kalan bütçeye indir.
+  if (availableOutput < 1) {
+    throw new Error(`Groq TPM bütçesi yetersiz: prompt yaklaşık ${promptTokens} token, bütçe ${GROQ_TPM_BUDGET}.`);
   }
-  const safeOutput = Math.min(Math.floor(requestedOutput), availableOutput);
+  const safeOutput = Math.max(1, Math.min(Math.floor(requestedOutput), availableOutput));
   const content = /json/i.test(prompt) ? prompt : `${prompt}\n\nYanıtı yalnızca geçerli JSON formatında ver.`;
   const body = { model, messages: [{ role: "user", content }], temperature: 0.2, max_completion_tokens: safeOutput };
   if (useSearch) {
@@ -292,16 +294,23 @@ async function callGroqModel(env, key, model, prompt, maxOutputTokens, useSearch
 // === FAZ 8 B-2: In-flight lock wrapper ===
 export async function callLLMWithFallback(env, prompt, maxOutputTokens, useSearch, outerSignal, context = {}) {
   const promptStr = String(prompt || "");
-  // Farklı arama modu/çıktı limiti olan çağrılar aynı in-flight sonucu paylaşmamalı.
+  const run = () => _callLLMWithFallbackInner(env, promptStr, maxOutputTokens, useSearch, outerSignal, context);
+
+  // İptal sinyalli istekleri ortak promise'e bağlama: bir istemcinin bağlantısı
+  // kesilirse aynı promise'i bekleyen başka bir kullanıcının çağrısı iptal olmamalı.
+  if (outerSignal) return run();
+
+  // Farklı prompt, çıktı bütçesi, arama modu veya model zincirleri aynı kilidi paylaşmasın.
   const lockMaterial = JSON.stringify({
     prompt: promptStr,
     maxOutputTokens: Number(maxOutputTokens) || null,
     useSearch: Boolean(useSearch),
     geminiModel: env.GEMINI_MODEL || null,
-    groqModel: env.GROQ_MODEL || null
+    groqModel: env.GROQ_MODEL || null,
+    customLockKey: context.lockKey || null
   });
-  const lockKey = context.lockKey || `llm:${simpleHash(lockMaterial)}`;
-  return acquireInFlightLock(lockKey, () => _callLLMWithFallbackInner(env, prompt, maxOutputTokens, useSearch, outerSignal, context));
+  const lockKey = `llm:${simpleHash(lockMaterial)}`;
+  return acquireInFlightLock(lockKey, run);
 }
 
 async function _callLLMWithFallbackInner(env, prompt, maxOutputTokens, useSearch, outerSignal, context = {}) {
