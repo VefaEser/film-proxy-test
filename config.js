@@ -117,10 +117,9 @@ FİLTRE ADI: Hikâyedeki karakter niteliği.
   "filter_info.story_dimensions": `[YZ bağlamı]
 FİLTRE ADI: Filmin diğer filmlerle ilgisi.
 İKİ AŞAMALI:
-1) ÖNCE şu 12 slug listesinden en az birini seç — filtre eşleşmesi bunlarla yapılır:
-   has_sequel, is_sequel, series_sequel, series_prequel, series_spinoff, concept, reboot, film_franchise, remake, similar_script_version, same_plot_diff_script, same_plot_diff_angle
+1) ÖNCE şu 11 slug listesinden en az birini seç — filtre eşleşmesi bunlarla yapılır:
+   has_sequel, is_sequel, series_sequel, series_prequel, series_spinoff, reboot, film_franchise, remake, similar_script_version, same_plot_diff_script, same_plot_diff_angle
 TANIMLAR:
-- concept (Konsept filmi): Aynı konseptin farklı dönemlerde, farklı oyuncularla ve birbirinden BAĞIMSIZ hikâyelerle tekrar çekilmesi.
 - is_sequel (Devam filmi): Hikâye bir önceki filmin doğrudan devamıdır.
 - has_sequel: Bu filmin bir devam filmi çekilmiştir (kendisi ilk filmdir).
 - reboot (Yeniden Başlatma): Bir film serisinin hikâyesini veya evrenini SIFIRDAN başlatan yeni başlangıç.
