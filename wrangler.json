@@ -1,8 +1,10 @@
+
 {
   "name": "film-proxy",
   "main": "index.js",
   "compatibility_date": "2026-10-14",
   "keep_vars": true,
+  "migrations_dir": "migrations",
   "placement": {
     "mode": "smart"
   },
@@ -15,5 +17,8 @@
   },
   "compatibility_flags": [
     "nodejs_compat"
-  ]
-      }
+  ],
+  "vars": {
+    "IS_TEST_ENV": "false"
+  }
+}
