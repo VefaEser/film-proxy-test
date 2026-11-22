@@ -39,7 +39,7 @@ jobs:
 
       - name: Run migration checks
         env:
-          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
-          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          TEST_TURSO_DATABASE_URL: ${{ secrets.TEST_TURSO_DATABASE_URL }}
+          TEST_TURSO_AUTH_TOKEN: ${{ secrets.TEST_TURSO_AUTH_TOKEN }}
           APPLY_MIGRATIONS: ${{ inputs.apply }}
         run: node scripts/turso-migrate.mjs
