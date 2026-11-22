@@ -4,8 +4,8 @@ import { readFile, readdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
-const url = process.env.TURSO_DATABASE_URL;
-const authToken = process.env.TURSO_AUTH_TOKEN;
+const url = process.env.TEST_TURSO_DATABASE_URL;
+const authToken = process.env.TEST_TURSO_AUTH_TOKEN;
 const apply = process.env.APPLY_MIGRATIONS === "true";
 const MIGRATIONS_DIR = "migrations";
 
@@ -23,7 +23,7 @@ const BASELINE = [
 ];
 
 if (!url || !authToken) {
-  throw new Error("TURSO_DATABASE_URL veya TURSO_AUTH_TOKEN eksik.");
+  throw new Error("TEST_TURSO_DATABASE_URL veya TEST_TURSO_AUTH_TOKEN eksik.");
 }
 
 const client = createClient({ url, authToken });
