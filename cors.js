@@ -1,7 +1,6 @@
-// cors.js — Canlı ve test HF siteleri için merkezi CORS.
-// Cookie tabanlı oturumlarda wildcard kullanılamaz; yalnızca izinli Origin döndürülür.
+// cors.js — Yalnızca test HF sitesi için merkezi CORS.
+// Cookie tabanlı oturumlarda wildcard kullanılmaz.
 const ALLOWED_ORIGINS = new Set([
-  "https://vefaeser-kestik.static.hf.space",
   "https://vefaeser-kestiktest.static.hf.space"
 ]);
 
