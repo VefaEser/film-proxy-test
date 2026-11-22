@@ -109,8 +109,27 @@ async function handleRequest(request, env, ctx) {
         groqKeys: [!!env.GROQ_API_KEY_1, !!env.GROQ_API_KEY_2, !!env.GROQ_API_KEY_3],
         geminiKeys: [!!env.GEMINI_API_KEY_1, !!env.GEMINI_API_KEY_2, !!env.GEMINI_API_KEY_3],
         adminToken: !!env.ADMIN_TOKEN, metatake: true, filmmap: true, staticOptions: true,
-        db: !!env.TURSO_DATABASE_URL && !!env.TURSO_AUTH_TOKEN,
-        dbConfigured: !!env.TURSO_DATABASE_URL && !!env.TURSO_AUTH_TOKEN,
+        db: !!(
+  (env.IS_TEST_ENV
+    ? env.TEST_TURSO_DATABASE_URL
+    : env.TURSO_DATABASE_URL)
+  &&
+  (env.IS_TEST_ENV
+    ? env.TEST_TURSO_AUTH_TOKEN
+    : env.TURSO_AUTH_TOKEN)
+),
+
+dbConfigured: !!(
+  (env.IS_TEST_ENV
+    ? env.TEST_TURSO_DATABASE_URL
+    : env.TURSO_DATABASE_URL)
+  &&
+  (env.IS_TEST_ENV
+    ? env.TEST_TURSO_AUTH_TOKEN
+    : env.TURSO_AUTH_TOKEN)
+),
+
+dbEnvironment: env.IS_TEST_ENV ? "test" : "live",
         dbConnected,
         dbPingError,
         dbType: "turso", defaultMinImdbVotes: 100, keyHealth
@@ -288,24 +307,62 @@ async function handleRequest(request, env, ctx) {
   } catch (e) { console.error(e.stack || e); const message = String(e.message || e); const status = e.status || (/API_KEY|Secret .*tanımlı değil|gerekli/.test(message) ? 503 : 500); return jsonError(message, status); }
 }
 
+
 export default {
   async fetch(request, env, ctx) {
     let response;
-    const appEnv = Object.assign({}, env);
+
+    const TEST_ORIGIN =
+      "https://vefaeser-kestiktest.static.hf.space";
+
+    const origin = request.headers.get("Origin") || "";
+
+    // Test ve canlı ortamı ayır.
+    const useTestDatabase = origin === TEST_ORIGIN;
+
+    const appEnv = Object.assign({}, env, {
+      IS_TEST_ENV: useTestDatabase
+    });
+
+    // Doğru Turso veritabanına bağlan.
     try {
-      appEnv.DB = createTursoAdapter(env);
+      appEnv.DB = createTursoAdapter(env, useTestDatabase);
     } catch (e) {
       appEnv.DB = null;
-      console.error("[turso-adapter-init]", e?.stack || e);
+
+      console.error(
+        "[turso-adapter-init]",
+        useTestDatabase ? "TEST DB" : "LIVE DB",
+        e?.stack || e
+      );
     }
+
+    // İsteği işle.
     try {
       response = await handleRequest(request, appEnv, ctx);
     } catch (e) {
       console.error("[fetch-fatal]", e?.stack || e);
-      response = jsonError("Sunucu isteği işlerken beklenmeyen bir hata oluştu.", 500);
+
+      response = jsonError(
+        "Sunucu isteği işlerken beklenmeyen bir hata oluştu.",
+        500
+      );
     }
+
+    // CORS başlıklarını düzenle.
     const newHeaders = new Headers(response.headers);
-    for (const [k, v] of Object.entries(corsHeaders(request))) newHeaders.set(k, v);
-    return new Response(response.body, { status: response.status, headers: newHeaders });
+
+    newHeaders.delete("Access-Control-Allow-Origin");
+    newHeaders.delete("Access-Control-Allow-Credentials");
+
+    for (const [k, v] of Object.entries(corsHeaders(request))) {
+      newHeaders.set(k, v);
+    }
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders
+    });
   }
 };
