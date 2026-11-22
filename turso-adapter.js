@@ -1,4 +1,3 @@
-
 import { createClient } from "@libsql/client/web";
 
 function normalizeValue(value) {
@@ -29,17 +28,25 @@ function normalizeResult(result) {
   };
 }
 
-export function createTursoAdapter(env) {
-  const url = typeof env.TURSO_DATABASE_URL === "string"
-    ? env.TURSO_DATABASE_URL.trim()
-    : "";
+export function createTursoAdapter(env, useTest = false) {
+  const url = String(
+    useTest
+      ? env.TEST_TURSO_DATABASE_URL || ""
+      : env.TURSO_DATABASE_URL || ""
+  ).trim();
 
-  const authToken = typeof env.TURSO_AUTH_TOKEN === "string"
-    ? env.TURSO_AUTH_TOKEN.trim()
-    : "";
+  const authToken = String(
+    useTest
+      ? env.TEST_TURSO_AUTH_TOKEN || ""
+      : env.TURSO_AUTH_TOKEN || ""
+  ).trim();
 
   if (!url || !authToken) {
-    throw new Error("Turso credentials are missing.");
+    throw new Error(
+      useTest
+        ? "Test Turso credentials are missing. Live database fallback is disabled."
+        : "Live Turso credentials are missing."
+    );
   }
 
   const client = createClient({ url, authToken });
@@ -51,9 +58,6 @@ export function createTursoAdapter(env) {
 
     let args = [];
 
-    // libSQL batch(), hazırlanmış ifadelerden sql ve args
-    // alanlarını okur. Getter'lar bind() sonrasındaki güncel
-    // parametrelerin aktarılmasını sağlar.
     const statement = {
       get sql() {
         return sql;
@@ -105,10 +109,7 @@ export function createTursoAdapter(env) {
           );
         }
 
-        return {
-          sql: statement,
-          args: []
-        };
+        return { sql: statement, args: [] };
       }
 
       if (
