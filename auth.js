@@ -1,4 +1,3 @@
-
 // auth.js — Kayıt/giriş/şifre sıfırlama + güvenlik + permissions döndürme.
 // Faz 3: CORS temizlendi + askıya alınmış kullanıcı oturumu engellendi.
 // Faz 6: /auth/recover/start ve /auth/recover/verify enumeration düzeltmesi
@@ -34,9 +33,7 @@ function getCookie(req, name) {
   for (const part of cookie.split(";")) { const [k, ...v] = part.trim().split("="); if (k === name) return v.join("="); }
   return null;
 }
-// Aynı Worker iki HF alan adına hizmet verdiği için test ve canlı oturum
-// çerezleri ayrı adlarla tutulur. IS_TEST_ENV, Worker tarafından isteğin
-// ortamına göre ayarlanmalıdır.
+// Tek Worker iki HF alan adına hizmet verir. Test ve canlı oturumları ayrıdır.
 function sessionCookieName(env) { return env?.IS_TEST_ENV === true ? "sid_test" : "sid"; }
 function sessionCookieHeader(token, maxAge, env) { return `${sessionCookieName(env)}=${token}; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=${maxAge}`; }
 function clearSessionCookie(env) { return `${sessionCookieName(env)}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`; }
@@ -231,9 +228,8 @@ export async function handleAuth(request, env, ctx) {
     const securityQuestions = Array.isArray(body.securityQuestions) ? body.securityQuestions : [];
     if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) return jsonErr("Kullanıcı adı 3-32 karakter (harf, rakam, _ . -)", 400);
     if (password.length < 6) return jsonErr("Şifre en az 6 karakter olmalı", 400);
-    if (password.length > 1024) return jsonErr("Şifre çok uzun", 400);
     if (!email) return jsonErr("E-posta adresi zorunludur", 400);
-    if (email.length > 254 || !isValidEmail(email)) return jsonErr("Geçerli bir e-posta adresi girin", 400);
+    if (!isValidEmail(email)) return jsonErr("Geçerli bir e-posta adresi girin", 400);
     if (securityQuestions.length !== 3) return jsonErr("3 güvenlik sorusu gerekli", 400);
     try {
       const existing = await env.DB.prepare("SELECT id FROM users WHERE username = ? COLLATE NOCASE AND deleted_at IS NULL").bind(username).first();
@@ -248,7 +244,6 @@ export async function handleAuth(request, env, ctx) {
       for (const q of securityQuestions) {
         const normAns = String(q.answer || "").trim().toLowerCase();
         if (!normAns) return jsonErr("Güvenlik cevabı boş olamaz", 400);
-        if (normAns.length > 500) return jsonErr("Güvenlik cevabı çok uzun", 400);
         const qSalt = randomHex(16);
         hashedQ.push({ key: String(q.key || ""), answerHash: await hashPassword(normAns, qSalt), answerSalt: qSalt });
       }
@@ -273,7 +268,6 @@ export async function handleAuth(request, env, ctx) {
     const login = String(body.login || "").trim();
     const password = String(body.password || "");
     if (!login || !password) return jsonErr("Kullanıcı adı/numara ve şifre gerekli", 400);
-    if (login.length > 100 || password.length > 1024) return jsonErr("Giriş bilgileri geçersiz", 400);
     const user = await findUserByLogin(env, login);
     if (!user) { await recordIpFailure(env, ip); return jsonErr("Kullanıcı bulunamadı", 401); }
     if (user.is_suspended) return jsonErr("Hesap askıya alınmış", 403);
@@ -336,18 +330,10 @@ export async function handleAuth(request, env, ctx) {
     const login = String(body.login || "").trim();
     const user = await findUserByLogin(env, login);
     // Kullanıcı yoksa veya güvenlik sorusu tanımlamamışsa deterministik fake sorular
-    // (aynı login için her zaman 3 soru döner — saldırgan kullanıcı var mı yok mu ayırt edemez)
+    // (aynı login için her zaman aynı 3 soru döner — saldırgan kullanıcı var mı yok mu ayırt edemez)
     if (!user) return jsonRes({ ok: true, questions: deterministicQuestions(login) });
-    let questions = [];
-    try {
-      const parsed = user.security_questions_json ? JSON.parse(user.security_questions_json) : [];
-      if (Array.isArray(parsed)) questions = parsed;
-    } catch {
-      // Bozuk/eski kayıtlar kullanıcı varlığını açığa çıkarmadan sahte sorular döndürür.
-    }
-    if (questions.length !== 3 || questions.some(q => !q || typeof q.key !== "string" || !q.key)) {
-      return jsonRes({ ok: true, questions: deterministicQuestions(login) });
-    }
+    const questions = user.security_questions_json ? JSON.parse(user.security_questions_json) : [];
+    if (!questions.length) return jsonRes({ ok: true, questions: deterministicQuestions(login) });
     return jsonRes({ ok: true, questions: questions.map(q => ({ key: q.key })) });
   }
 
@@ -365,46 +351,19 @@ export async function handleAuth(request, env, ctx) {
       await recordIpFailure(env, ip);
       return jsonErr(GENERIC_FAIL, 401);
     }
-    let questions = [];
-    try {
-      const parsed = user.security_questions_json ? JSON.parse(user.security_questions_json) : [];
-      if (Array.isArray(parsed)) questions = parsed;
-    } catch {
-      questions = [];
-    }
-
-    // KRİTİK GÜVENLİK: [] sorusu ve [] cevabı eşit uzunlukta olduğundan,
-    // eski/bozuk sorusu olmayan hesaplarda önceki kod parola sıfırlama tokenı
-    // üretebiliyordu. Sıfırlama yalnızca tam 3 geçerli hash kaydıyla mümkündür.
-    const validQuestionSet = questions.length === 3 && questions.every(q =>
-      q && typeof q === "object" &&
-      typeof q.answerHash === "string" && /^[a-f0-9]{64}$/i.test(q.answerHash) &&
-      (typeof q.answerSalt === "string" && /^[a-f0-9]{32}$/i.test(q.answerSalt) ||
-        typeof user.password_salt === "string" && /^[a-f0-9]{32}$/i.test(user.password_salt))
-    );
-    if (!validQuestionSet || answers.length !== 3) {
+    const questions = user.security_questions_json ? JSON.parse(user.security_questions_json) : [];
+    if (answers.length !== questions.length) {
       await recordIpFailure(env, ip);
       return jsonErr(GENERIC_FAIL, 401);
     }
-
-    let answersValid = true;
-    try {
-      for (let i = 0; i < 3; i++) {
-        const normAns = String(answers[i] ?? "").trim().toLowerCase();
-        if (!normAns || normAns.length > 500) {
-          answersValid = false;
-          break;
-        }
-        const salt = questions[i].answerSalt || user.password_salt;
-        const h = await hashPassword(normAns, salt);
-        if (!timingSafeEqualStr(h, questions[i].answerHash)) answersValid = false;
+    for (let i = 0; i < questions.length; i++) {
+      const normAns = String(answers[i] || "").trim().toLowerCase();
+      const salt = questions[i].answerSalt || user.password_salt;
+      const h = await hashPassword(normAns, salt);
+      if (!timingSafeEqualStr(h, questions[i].answerHash)) {
+        await recordIpFailure(env, ip);
+        return jsonErr(GENERIC_FAIL, 401);
       }
-    } catch {
-      answersValid = false;
-    }
-    if (!answersValid) {
-      await recordIpFailure(env, ip);
-      return jsonErr(GENERIC_FAIL, 401);
     }
     await resetIpFailures(env, ip);
     const token = randomHex(32);
@@ -420,7 +379,6 @@ export async function handleAuth(request, env, ctx) {
     const resetToken = String(body.resetToken || "");
     const newPassword = String(body.password || "");
     if (!resetToken || newPassword.length < 6) return jsonErr("Token ve şifre (min 6) gerekli", 400);
-    if (resetToken.length > 256 || newPassword.length > 1024) return jsonErr("Token veya şifre çok uzun", 400);
     const hash = await sha256Hex(resetToken);
     const now = Math.floor(Date.now() / 1000);
     const row = await env.DB.prepare(`SELECT user_id FROM user_sessions WHERE token_hash = ? AND expires_at > ? AND user_agent = 'recover'`).bind(hash, now).first();
@@ -440,7 +398,6 @@ export async function handleAuth(request, env, ctx) {
     const oldPw = String(body.oldPassword || "");
     const newPw = String(body.newPassword || "");
     if (newPw.length < 6) return jsonErr("Yeni şifre en az 6 karakter", 400);
-    if (oldPw.length > 1024 || newPw.length > 1024) return jsonErr("Şifre çok uzun", 400);
     const user = await env.DB.prepare("SELECT password_hash, password_salt FROM users WHERE id = ?").bind(sess.user_id).first();
     if (!user) return jsonErr("Kullanıcı bulunamadı", 404);
     const oldHash = await hashPassword(oldPw, user.password_salt);
@@ -482,4 +439,4 @@ export async function getCurrentUserWithAdminBridge(env, request) {
     if (admin) return { user_id: admin.id, username: admin.username, is_admin: 1, is_public: admin.is_public, register_number: admin.register_number, is_approved: 1, is_email_verified: 1 };
   }
   return null;
-}
+    }
