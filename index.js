@@ -15,8 +15,13 @@ import {
   tmdb, getSiteRatingForMovie
 } from "./worker-core.js";
 
-const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,Authorization" };
+const TEST_ORIGIN =
+  "https://vefaeser-kestiktest.static.hf.space";
 
+const CORS = {
+  "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type,Authorization"
+};
 async function requireAdminEither(env, request) {
   if (isAdmin(request, env)) return { via: "bearer" };
   const user = await getCurrentUserWithAdminBridge(env, request);
