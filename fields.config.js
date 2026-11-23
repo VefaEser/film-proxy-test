@@ -220,7 +220,6 @@ DİKKAT: silent (hiç ses yok) ile no_music (ses var, müzik yok) FARKLIDIR.`,
   story_dimensions: `story_dimensions: string[] — İKİ AŞAMALI:
 1) ÖNCE şu slug listesinden en az birini seç (filtre eşleşmesi bunlarla yapılır): [${_STORY_DIMS_JSON}]
 TANIMLAR:
-- concept: Konsept filmi.
 - is_sequel: Kendisi bir devam filmi.
 - has_sequel: Bu filmin bir devam filmi çekilmiştir.
 - reboot: Bir film serisinin hikâyesini veya evrenini SIFIRDAN başlatan yeni başlangıç.
