@@ -18,7 +18,105 @@ function invalidateRatingStatsCache({ tmdbId, imdbId, movieId }) {
   if (movieId) ratingStatsCache.delete(`mid:${movieId}`);
 }
 
-async function userHasAnyPermission(env, sess, perms) { if (sess.is_admin) return true; try { const placeholders = perms.map(() => "?").join(","); const row = await env.DB.prepare(`SELECT 1 FROM user_permissions WHERE user_id = ? AND permission IN (${placeholders}) LIMIT 1`).bind(sess.user_id, ...perms).first(); return !!row; } catch { return false; } }
+async function userHasAnyPermission(env, sess, perms) { if (sess?.is_admin) return true; if (!sess) return false; try { const placeholders = perms.map(() => "?").join(","); const row = await env.DB.prepare(`SELECT 1 FROM user_permissions WHERE user_id = ? AND permission IN (${placeholders}) LIMIT 1`).bind(sess.user_id, ...perms).first(); return !!row; } catch { return false; } }
+
+function hashListSnapshot(rows) {
+  let hash = 2166136261;
+  for (const row of rows || []) {
+    const value = `${String(row.movie_id || "")}\u0000${row.user_rating == null ? "" : String(row.user_rating)}\u0001`;
+    for (let i = 0; i < value.length; i++) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export async function bulkRemoveListRows(env, userId, listType, movieIds = null) {
+  const normalizedUserId = Number(userId);
+  if (!Number.isSafeInteger(normalizedUserId) || normalizedUserId <= 0) {
+    throw new Error("Geçersiz kullanıcı ID.");
+  }
+  if (!["watched", "want", "wont"].includes(listType)) {
+    throw new Error("Geçersiz liste türü.");
+  }
+
+  let normalizedIds = null;
+  if (movieIds !== null) {
+    if (!Array.isArray(movieIds) || !movieIds.length || movieIds.length > 100) {
+      throw new Error("Seçili film sayısı 1–100 arasında olmalı.");
+    }
+    normalizedIds = [...new Set(movieIds.map(id => String(id ?? "").trim()))];
+    if (normalizedIds.some(id => !id || id.length > 200)) {
+      throw new Error("Film ID listesinde geçersiz kayıt var.");
+    }
+  }
+
+  const idsClause = normalizedIds
+    ? `AND movie_id IN (${normalizedIds.map(() => "?").join(",")})`
+    : "";
+  const args = normalizedIds
+    ? [normalizedUserId, listType, ...normalizedIds]
+    : [normalizedUserId, listType];
+  const now = Math.floor(Date.now() / 1000);
+
+  const { results: affectedRows } = await env.DB.prepare(`
+    SELECT movie_id, imdb_id, tmdb_id
+    FROM user_movies
+    WHERE user_id = ? AND list_type = ? ${idsClause}
+  `).bind(...args).all();
+
+  const preserveRatings = env.DB.prepare(`
+    INSERT INTO user_movies (
+      user_id, list_type, movie_id, imdb_id, tmdb_id,
+      title_original, title_tr, url, year, imdb_rating,
+      imdb_votes, runtime, genres, directors, user_rating,
+      source_meta_json, source, created_at, updated_at
+    )
+    SELECT
+      user_id, 'rating_only', movie_id, imdb_id, tmdb_id,
+      title_original, title_tr, url, year, imdb_rating,
+      imdb_votes, runtime, genres, directors, user_rating,
+      source_meta_json, source, created_at, ?
+    FROM user_movies
+    WHERE user_id = ?
+      AND list_type = ?
+      AND user_rating IS NOT NULL
+      ${idsClause}
+    ON CONFLICT(user_id, list_type, movie_id)
+    DO UPDATE SET
+      imdb_id = COALESCE(user_movies.imdb_id, excluded.imdb_id),
+      tmdb_id = COALESCE(user_movies.tmdb_id, excluded.tmdb_id),
+      title_original = COALESCE(user_movies.title_original, excluded.title_original),
+      title_tr = COALESCE(user_movies.title_tr, excluded.title_tr),
+      url = COALESCE(user_movies.url, excluded.url),
+      year = COALESCE(user_movies.year, excluded.year),
+      imdb_rating = COALESCE(user_movies.imdb_rating, excluded.imdb_rating),
+      imdb_votes = COALESCE(user_movies.imdb_votes, excluded.imdb_votes),
+      runtime = COALESCE(user_movies.runtime, excluded.runtime),
+      genres = COALESCE(user_movies.genres, excluded.genres),
+      directors = COALESCE(user_movies.directors, excluded.directors),
+      user_rating = COALESCE(user_movies.user_rating, excluded.user_rating),
+      source_meta_json = COALESCE(user_movies.source_meta_json, excluded.source_meta_json),
+      source = COALESCE(user_movies.source, excluded.source),
+      updated_at = excluded.updated_at
+  `).bind(now, ...args);
+
+  const removeRows = env.DB.prepare(`
+    DELETE FROM user_movies
+    WHERE user_id = ? AND list_type = ? ${idsClause}
+  `).bind(...args);
+
+  // Puanlı kayıtlar önce rating_only listesine taşınır; ardından hedef liste temizlenir.
+  const batchResults = await env.DB.batch([preserveRatings, removeRows]);
+  const deleteResult = batchResults?.[1];
+  const deleted = Number(deleteResult?.rowsAffected ?? deleteResult?.meta?.changes ?? 0);
+
+  for (const row of affectedRows || []) {
+    invalidateRatingStatsCache({ movieId: row.movie_id, tmdbId: row.tmdb_id, imdbId: row.imdb_id });
+  }
+  return deleted;
+}
 
 function normalizeRatingValue(raw) {
   if (raw == null) return null;
@@ -459,23 +557,45 @@ export async function handleUser(request, env, ctx) {
 
   if (path.startsWith("/admin/user-lists/") && request.method === "GET") {
     if (!isAuth) return jsonErr("Giriş gerekli", 401);
-    const allowed = await userHasAnyPermission(env, sess, ["refresh_movie", "csv_import_cards", "user_manage"]);
+    const allowed = await userHasAnyPermission(env, sess, ["user_lists_view"]);
     if (!allowed) return jsonErr("Bu işlem için yetkiniz yok", 403);
     const userId = parseInt(path.replace("/admin/user-lists/", ""), 10);
     if (!userId) return jsonErr("userId gerekli", 400);
     const user = await env.DB.prepare("SELECT id, username, register_number, is_public, rating_visibility FROM users WHERE id = ? AND deleted_at IS NULL").bind(userId).first();
     if (!user) return jsonErr("Kullanıcı bulunamadı", 404);
     const lists = { watched: [], want: [], wont: [] };
+    const requestedPage = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+    const pageSizeParam = url.searchParams.get("pageSize");
+    const requestedPageSize = pageSizeParam == null ? 500 : parseInt(pageSizeParam, 10);
+    const pageSize = pageSizeParam == null
+      ? 500
+      : (Number.isFinite(requestedPageSize)
+          ? Math.min(100, Math.max(10, Math.floor(requestedPageSize / 10) * 10))
+          : 10);
+    const offset = (requestedPage - 1) * pageSize;
+    const pagination = {};
     for (const lt of ["watched", "want", "wont"]) {
-      const { results } = await env.DB.prepare(`SELECT movie_id, imdb_id, tmdb_id, title_original, title_tr, year, imdb_rating, user_rating, updated_at FROM user_movies WHERE user_id = ? AND list_type = ? ORDER BY updated_at DESC LIMIT 500`).bind(userId, lt).all();
+      const { results } = await env.DB.prepare(`
+        SELECT movie_id, imdb_id, tmdb_id, title_original, title_tr, year,
+               imdb_rating, user_rating, updated_at
+        FROM user_movies
+        WHERE user_id = ? AND list_type = ?
+        ORDER BY updated_at DESC
+        LIMIT ? OFFSET ?
+      `).bind(userId, lt, pageSize, offset).all();
+      const countRow = await env.DB.prepare(
+        "SELECT COUNT(*) AS total FROM user_movies WHERE user_id = ? AND list_type = ?"
+      ).bind(userId, lt).first();
+      const total = Number(countRow?.total || 0);
       lists[lt] = results || [];
+      pagination[lt] = { page: requestedPage, pageSize, total, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
     }
-    return jsonRes({ user, lists });
+    return jsonRes({ user, lists, pagination });
   }
 
   if (path.startsWith("/admin/user-ratings/") && request.method === "GET") {
     if (!isAuth) return jsonErr("Giriş gerekli", 401);
-    const allowed = await userHasAnyPermission(env, sess, ["refresh_movie", "csv_import_cards", "user_manage"]);
+    const allowed = await userHasAnyPermission(env, sess, ["user_lists_view"]);
     if (!allowed) return jsonErr("Bu işlem için yetkiniz yok", 403);
     const userId = parseInt(path.replace("/admin/user-ratings/", ""), 10);
     if (!userId) return jsonErr("userId gerekli", 400);
@@ -609,9 +729,9 @@ export async function handleUser(request, env, ctx) {
     const lt = path.split("/")[2];
     if (!["watched", "want", "wont"].includes(lt)) return jsonErr("Geçersiz liste", 400);
     const page = Math.max(1, parseInt(url.searchParams.get("page") || "1"));
- const requestedPageSize = parseInt(url.searchParams.get("pageSize") || "10");
+ const requestedPageSize = parseInt(url.searchParams.get("pageSize") || "10", 10);
  const pageSize = Number.isFinite(requestedPageSize)
-   ? Math.min(100, Math.max(10, requestedPageSize))
+   ? Math.min(100, Math.max(10, Math.floor(requestedPageSize / 10) * 10))
    : 10;
     const sortParam = url.searchParams.get("sort");
     const sort = sortParam === "imdb" ? "imdb_desc" : sortParam === "user" ? "user_desc" : "year_desc";
@@ -749,6 +869,60 @@ export async function handleUser(request, env, ctx) {
       return jsonRes({ ok: true });
     } catch (e) { return jsonErr(e.message, 500); }
   }
+  if (path === "/lists/bulk-remove" && request.method === "POST") {
+    if (!isAuth) return jsonErr("Giriş gerekli", 401);
+    let body;
+    try { body = await request.json(); }
+    catch { return jsonErr("Geçersiz JSON", 400); }
+
+    const listType = String(body.listType || "");
+    if (!["watched", "want", "wont"].includes(listType)) {
+      return jsonErr("Geçersiz liste türü", 400);
+    }
+    const movieIds = body.movieIds == null ? null : body.movieIds;
+    if (movieIds !== null && (!Array.isArray(movieIds) || !movieIds.length || movieIds.length > 100)) {
+      return jsonErr("Seçili film sayısı 1–100 arasında olmalı", 400);
+    }
+    if (movieIds !== null && movieIds.some(id => typeof id !== "string" || !id.trim() || id.length > 200)) {
+      return jsonErr("Film ID listesinde geçersiz kayıt var", 400);
+    }
+
+    const idsClause = movieIds === null ? "" : `AND movie_id IN (${movieIds.map(() => "?").join(",")})`;
+    const countArgs = movieIds === null ? [sess.user_id, listType] : [sess.user_id, listType, ...movieIds];
+    const { results: snapshotRows } = await env.DB.prepare(`
+      SELECT movie_id, user_rating
+      FROM user_movies
+      WHERE user_id = ? AND list_type = ? ${idsClause}
+      ORDER BY movie_id
+    `).bind(...countArgs).all();
+    const total = (snapshotRows || []).length;
+    const ratedCount = (snapshotRows || []).filter(row => row.user_rating != null).length;
+    const snapshotHash = hashListSnapshot(snapshotRows || []);
+    const action = String(body.action || "");
+
+    if (action === "preview") {
+      return jsonRes({ ok: true, preview: true, listType, total, ratedCount, snapshotHash });
+    }
+    if (action !== "confirm") return jsonErr("action preview veya confirm olmalı", 400);
+
+    const expectedCount = Number(body.expectedCount);
+    if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) {
+      return jsonErr("Önizlemede dönen expectedCount gerekli", 400);
+    }
+    const expectedHash = String(body.snapshotHash || "");
+    if (expectedCount !== total || !expectedHash || expectedHash !== snapshotHash) {
+      return jsonRes({ ok: false, error: "Liste önizlemeden sonra değişmiş. Yeniden önizleme yapın.", total, ratedCount, snapshotHash }, 409);
+    }
+    if (total === 0) return jsonRes({ ok: true, deletedCount: 0, ratingsPreserved: 0 });
+
+    try {
+      const deletedCount = await bulkRemoveListRows(env, sess.user_id, listType, movieIds);
+      return jsonRes({ ok: true, deletedCount, ratingsPreserved: ratedCount });
+    } catch (e) {
+      return jsonErr(e.message, 400);
+    }
+  }
+
   if (path.startsWith("/lists/remove/") && request.method === "DELETE") {
     const parts = path.replace("/lists/remove/", "").split("/");
     const lt = parts[0];
