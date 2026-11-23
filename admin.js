@@ -10,12 +10,103 @@ function safeJSON(t, fb = null) { try { return JSON.parse(t); } catch { return f
 
 async function requireAdmin(env, request) {
   const sess = await getCurrentUserWithAdminBridge(env, request);
-  if (!sess) throw Object.assign(new Error("Giriş gerekli"), { status: 401 });
-  if (!sess.is_admin) throw Object.assign(new Error("Admin yetkisi gerekli"), { status: 403 });
+  if (!sess || sess.is_suspended) {
+    throw Object.assign(new Error("Giriş gerekli"), { status: 401 });
+  }
+
+  const path = new URL(request.url).pathname.replace(/^\/admin/, "");
+  const isBulkRoute = path.startsWith("/bulk/");
+
+  if (!sess.is_admin && !isBulkRoute) {
+    throw Object.assign(new Error("Admin yetkisi gerekli"), { status: 403 });
+  }
   return sess;
 }
 
-const ALLOWED_PERMS = new Set(["refresh_movie","edit_suggestions_approve","comment_approve","user_manage","field_unlock","csv_import_cards","view_private"]);
+const MANAGEMENT_PERMISSIONS = [
+  "user_lists_view",
+  "lists_bulk_remove",
+  "lists_bulk_clear",
+  "db_cards_view",
+  "db_cards_bulk_open",
+  "db_cards_bulk_refresh",
+  "db_cards_bulk_delete",
+  "csv_cards_view",
+  "csv_cards_bulk_open",
+  "csv_cards_bulk_refresh",
+  "csv_cards_bulk_remove",
+  "csv_cards_bulk_delete",
+  "external_import_view",
+  "external_import_bulk_remove",
+  "external_import_bulk_delete"
+];
+
+const ALLOWED_PERMS = new Set([
+  "refresh_movie",
+  "edit_suggestions_approve",
+  "comment_approve",
+  "user_manage",
+  "field_unlock",
+  "csv_import_cards",
+  "view_private",
+  ...MANAGEMENT_PERMISSIONS
+]);
+
+const BULK_TASK_PERMISSIONS = {
+  refresh_cards: "db_cards_bulk_refresh",
+  create_cards: "db_cards_bulk_open",
+  delete_cards: "db_cards_bulk_delete"
+};
+
+function hashListSnapshot(rows) {
+  let hash = 2166136261;
+  for (const row of rows || []) {
+    const value = `${String(row.movie_id || "")}\u0000${row.user_rating == null ? "" : String(row.user_rating)}\u0001`;
+    for (let i = 0; i < value.length; i++) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function permissionForTask(task) {
+  if (task?.task_type === "delete_list") {
+    try {
+      const parsed = JSON.parse(task.target || "null");
+      if (parsed && Array.isArray(parsed.movieIds)) return "lists_bulk_remove";
+    } catch {}
+    return "lists_bulk_clear";
+  }
+  return BULK_TASK_PERMISSIONS[task?.task_type] || null;
+}
+
+async function hasExactPermission(env, sess, permission) {
+  if (sess?.is_admin) return true;
+  if (!sess || !permission) return false;
+  try {
+    const row = await env.DB.prepare(
+      "SELECT 1 FROM user_permissions WHERE user_id = ? AND permission = ? LIMIT 1"
+    ).bind(sess.user_id, permission).first();
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+async function hasAnyBulkPermission(env, sess) {
+  if (sess?.is_admin) return true;
+  const permissions = [...Object.values(BULK_TASK_PERMISSIONS), "lists_bulk_remove", "lists_bulk_clear"];
+  try {
+    const placeholders = permissions.map(() => "?").join(",");
+    const row = await env.DB.prepare(
+      `SELECT 1 FROM user_permissions WHERE user_id = ? AND permission IN (${placeholders}) LIMIT 1`
+    ).bind(sess.user_id, ...permissions).first();
+    return !!row;
+  } catch {
+    return false;
+  }
+}
 
 function _globalRowHash(s) {
   let h = 0;
@@ -190,8 +281,67 @@ if (path === "/bulk/task" && request.method === "POST") {
         return jsonErr("Geçersiz taskType", 400);
     }
 
-    if (taskType === "delete_list" && !target) {
-        return jsonErr("Liste silme için target user_id gereklidir", 400);
+    const selectedListIds = taskType === "delete_list" && body.movieIds != null
+        ? body.movieIds
+        : null;
+    const requiredPermission = taskType === "delete_list"
+        ? (selectedListIds ? "lists_bulk_remove" : "lists_bulk_clear")
+        : BULK_TASK_PERMISSIONS[taskType];
+    if (!(await hasExactPermission(env, sess, requiredPermission))) {
+        return jsonErr("Bu toplu işlem için özel yetkiniz yok", 403);
+    }
+
+    let taskTarget = target || null;
+    if (taskType === "delete_list") {
+        const targetUserId = Number(body.userId ?? target);
+        if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {
+            return jsonErr("Liste işlemi için geçerli user_id gereklidir", 400);
+        }
+        if (!["watched", "want", "wont"].includes(listType)) {
+            return jsonErr("Geçersiz listType", 400);
+        }
+        if (selectedListIds !== null) {
+            if (!Array.isArray(selectedListIds) || !selectedListIds.length || selectedListIds.length > 100 ||
+                selectedListIds.some(id => typeof id !== "string" || !id.trim() || id.length > 200)) {
+                return jsonErr("Seçili film ID listesi 1–100 geçerli kayıt içermeli", 400);
+            }
+            taskTarget = JSON.stringify({ userId: targetUserId, movieIds: [...new Set(selectedListIds)] });
+        } else {
+            taskTarget = String(targetUserId);
+        }
+
+        const action = String(body.action || "");
+        if (action === "preview" || action === "confirm") {
+            const selectedClause = selectedListIds
+                ? ` AND movie_id IN (${[...new Set(selectedListIds)].map(() => "?").join(",")})`
+                : "";
+            const selectedArgs = selectedListIds ? [...new Set(selectedListIds)] : [];
+            const { results: snapshotRows } = await env.DB.prepare(`
+                SELECT movie_id, user_rating
+                FROM user_movies
+                WHERE user_id = ? AND list_type = ?${selectedClause}
+                ORDER BY movie_id
+            `).bind(targetUserId, listType, ...selectedArgs).all();
+            const previewTotal = (snapshotRows || []).length;
+            const ratedCount = (snapshotRows || []).filter(row => row.user_rating != null).length;
+            const snapshotHash = hashListSnapshot(snapshotRows || []);
+            if (action === "preview") {
+                return jsonRes({ ok: true, preview: true, total: previewTotal, ratedCount, snapshotHash });
+            }
+            const expectedCount = Number(body.expectedCount);
+            const expectedHash = String(body.snapshotHash || "");
+            if (!Number.isSafeInteger(expectedCount) || expectedCount < 0 || !expectedHash) {
+                return jsonErr("Önizlemeden dönen expectedCount ve snapshotHash gerekli", 400);
+            }
+            if (expectedCount !== previewTotal || expectedHash !== snapshotHash) {
+                return jsonRes({ ok: false, error: "Liste önizlemeden sonra değişmiş. Yeniden önizleme yapın.", total: previewTotal, ratedCount, snapshotHash }, 409);
+            }
+            const targetPayload = { userId: targetUserId, expectedCount, snapshotHash };
+            if (selectedListIds !== null) targetPayload.movieIds = [...new Set(selectedListIds)];
+            taskTarget = JSON.stringify(targetPayload);
+        } else {
+            return jsonErr("Liste silme için önce preview, ardından confirm gönderilmelidir", 400);
+        }
     }
 
     if (taskType === "delete_cards") {
@@ -212,19 +362,39 @@ if (path === "/bulk/task" && request.method === "POST") {
         Math.random().toString(36).slice(2, 8);
 
     const timestamp = Math.floor(Date.now() / 1000);
+    let taskTotal = 0;
+    if (taskType === "delete_list") {
+        let targetUserId = Number(taskTarget);
+        let selectedIds = null;
+        try {
+            const parsedTarget = JSON.parse(taskTarget || "null");
+            if (parsedTarget && Number.isSafeInteger(Number(parsedTarget.userId))) {
+                targetUserId = Number(parsedTarget.userId);
+                selectedIds = parsedTarget.movieIds || null;
+            }
+        } catch {}
+        const selectedClause = selectedIds ? ` AND movie_id IN (${selectedIds.map(() => "?").join(",")})` : "";
+        const countRow = await env.DB.prepare(
+            `SELECT COUNT(*) AS total FROM user_movies WHERE user_id = ? AND list_type = ?${selectedClause}`
+        ).bind(targetUserId, listType, ...(selectedIds || [])).first();
+        taskTotal = Number(countRow?.total || 0);
+    } else if (taskType === "delete_cards") {
+        taskTotal = JSON.parse(target || "[]").length;
+    }
 
     await env.DB.prepare(`
         INSERT INTO admin_tasks (
             id, admin_user_id, task_type, target, list_type,
             status, total, done, failed, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, 'pending', 0, 0, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, 0, 0, ?, ?)
     `).bind(
         taskId,
         sess.user_id,
         taskType,
-        target || null,
+        taskTarget,
         listType || null,
+        taskTotal,
         timestamp,
         timestamp
     ).run();
@@ -245,11 +415,17 @@ if (path.startsWith("/bulk/task/") && request.method === "GET") {
     if (!row) {
         return jsonErr("Görev bulunamadı", 404);
     }
+    if (!(await hasExactPermission(env, sess, permissionForTask(row)))) {
+        return jsonErr("Bu görevi görüntüleme yetkiniz yok", 403);
+    }
 
     return jsonRes({ ok: true, task: row });
 }
 
 if (path === "/bulk/tasks" && request.method === "GET") {
+    if (!(await hasAnyBulkPermission(env, sess))) {
+        return jsonErr("Toplu görevleri görüntüleme yetkiniz yok", 403);
+    }
     const { results } = await env.DB.prepare(`
         SELECT * FROM admin_tasks
         WHERE admin_user_id = ?
@@ -275,6 +451,14 @@ if (path === "/bulk/task/cancel" && request.method === "POST") {
 
     if (!taskId) {
         return jsonErr("taskId gerekli", 400);
+    }
+
+    const cancelTask = await env.DB.prepare(
+        "SELECT task_type, target FROM admin_tasks WHERE id = ? AND admin_user_id = ?"
+    ).bind(taskId, sess.user_id).first();
+    if (!cancelTask) return jsonErr("Görev bulunamadı", 404);
+    if (!(await hasExactPermission(env, sess, permissionForTask(cancelTask)))) {
+        return jsonErr("Bu görevi iptal etme yetkiniz yok", 403);
     }
 
     await env.DB.prepare(`
@@ -313,6 +497,9 @@ if (path === "/bulk/run" && request.method === "POST") {
 
     if (!task) {
         return jsonErr("Görev bulunamadı", 404);
+    }
+    if (!(await hasExactPermission(env, sess, permissionForTask(task)))) {
+        return jsonErr("Bu görevi çalıştırma yetkiniz yok", 403);
     }
 
     if (task.status !== "pending") {
@@ -358,6 +545,9 @@ if (path === "/bulk/run" && request.method === "POST") {
         };
 
         try {
+            if (!(await hasExactPermission(env, sess, permissionForTask(task)))) {
+                throw new Error("Görev çalışırken gerekli yetki kaldırıldı");
+            }
             if (
                 task.task_type === "refresh_cards" ||
                 task.task_type === "create_cards"
@@ -400,20 +590,39 @@ if (path === "/bulk/run" && request.method === "POST") {
                 }
 
             } else if (task.task_type === "delete_list") {
-                const targetUser = parseInt(task.target, 10);
-
+                let targetUser = parseInt(task.target, 10);
+                let selectedIds = null;
+                let expectedCount = null;
+                let expectedHash = "";
+                try {
+                    const parsedTarget = JSON.parse(task.target || "null");
+                    if (parsedTarget && Number.isSafeInteger(Number(parsedTarget.userId))) {
+                        targetUser = Number(parsedTarget.userId);
+                        selectedIds = parsedTarget.movieIds || null;
+                        expectedCount = Number.isSafeInteger(parsedTarget.expectedCount) ? parsedTarget.expectedCount : null;
+                        expectedHash = String(parsedTarget.snapshotHash || "");
+                    }
+                } catch {}
                 if (!Number.isSafeInteger(targetUser) || targetUser <= 0) {
                     throw new Error("Geçersiz target user_id");
                 }
-
-                const listType = task.list_type || "watched";
-
-                const result = await env.DB.prepare(`
-                    DELETE FROM user_movies
-                    WHERE user_id = ? AND list_type = ?
-                `).bind(targetUser, listType).run();
-
-                done = Number(result?.meta?.changes ?? 0);
+                const listType = task.list_type || "";
+                if (!["watched", "want", "wont"].includes(listType)) {
+                    throw new Error("Geçersiz list_type");
+                }
+                if (expectedCount !== null || expectedHash) {
+                    const idsClause = selectedIds ? ` AND movie_id IN (${selectedIds.map(() => "?").join(",")})` : "";
+                    const { results: currentRows } = await env.DB.prepare(`
+                        SELECT movie_id, user_rating FROM user_movies
+                        WHERE user_id = ? AND list_type = ?${idsClause}
+                        ORDER BY movie_id
+                    `).bind(targetUser, listType, ...(selectedIds || [])).all();
+                    if ((currentRows || []).length !== expectedCount || hashListSnapshot(currentRows || []) !== expectedHash) {
+                        throw new Error("Liste önizlemeden sonra değişmiş; görev güvenlik için durduruldu. Yeniden önizleme yapın.");
+                    }
+                }
+                const { bulkRemoveListRows } = await import("./users.js");
+                done = await bulkRemoveListRows(env, targetUser, listType, selectedIds);
                 await saveProgress();
 
             } else if (task.task_type === "delete_cards") {
@@ -426,10 +635,12 @@ if (path === "/bulk/run" && request.method === "POST") {
                     if (await checkCancel()) break;
 
                     try {
-                        await env.DB.prepare(`
-                            DELETE FROM movie_profiles
-                            WHERE movie_id = ?
-                        `).bind(String(id)).run();
+                        await env.DB.batch([
+                            env.DB.prepare("DELETE FROM movie_profile_fields WHERE movie_id = ?").bind(String(id)),
+                            env.DB.prepare("DELETE FROM movie_profiles WHERE movie_id = ?").bind(String(id)),
+                            env.DB.prepare("UPDATE user_movies SET tmdb_id = NULL, updated_at = ? WHERE tmdb_id = ?")
+                                .bind(now(), parseInt(String(id), 10) || String(id))
+                        ]);
 
                         done++;
                     } catch (e) {
