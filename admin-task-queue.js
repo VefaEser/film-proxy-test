@@ -42,8 +42,8 @@ async function refreshTaskSummary(env, taskId) {
         failed = (SELECT COUNT(*) FROM admin_task_items WHERE task_id = ? AND status = 'failed'),
         status = CASE
           WHEN status = 'cancelled' THEN 'cancelled'
-          WHEN EXISTS (SELECT 1 FROM admin_task_items WHERE task_id = ? AND status IN ('pending','running')) THEN 'running'
           WHEN EXISTS (SELECT 1 FROM admin_task_items WHERE task_id = ? AND status = 'failed') THEN 'failed'
+          WHEN EXISTS (SELECT 1 FROM admin_task_items WHERE task_id = ? AND status IN ('pending','running')) THEN 'running'
           ELSE 'completed'
         END,
         updated_at = ?,
@@ -73,6 +73,16 @@ async function processOne(env, onlyTaskId = null) {
       WHERE t.status = 'running'
         AND (? IS NULL OR t.id = ?)
         AND (i.status = 'pending' OR (i.status = 'running' AND i.lease_until < ?))
+        AND (
+          COALESCE(json_extract(i.payload_json, '$.finalize'), 0) != 1
+          OR NOT EXISTS (
+            SELECT 1
+            FROM admin_task_items prior
+            WHERE prior.task_id = i.task_id
+              AND prior.item_key != i.item_key
+              AND prior.status != 'completed'
+          )
+        )
       ORDER BY t.created_at ASC, i.id ASC
       LIMIT 1
     )

@@ -425,6 +425,7 @@ if (path === "/bulk/task" && request.method === "POST") {
 
     const timestamp = Math.floor(Date.now() / 1000);
     let itemPayloads = [];
+    let directSeedSpec = null;
 
     if (taskType === "delete_list") {
         let parsed = {};
@@ -581,16 +582,52 @@ if (path === "/bulk/task" && request.method === "POST") {
                 `SELECT movie_id FROM movie_profiles WHERE movie_id IN (${placeholders})`
             ).bind(...selectedIds).all();
             rows = result.results || [];
+        } else if (taskType === "refresh_cards" && targetCount === "all") {
+            const countRow = await env.DB.prepare(
+                "SELECT COUNT(*) AS total FROM movie_profiles"
+            ).first();
+            directSeedSpec = {
+                count: Number(countRow?.total || 0),
+                selectSql: `
+                    SELECT CAST(movie_id AS TEXT) AS movie_id
+                    FROM movie_profiles
+                `,
+                orderSql: "CAST(movie_id AS TEXT)"
+            };
         } else if (taskType === "refresh_cards") {
-            const query = targetCount === "all"
-                ? "SELECT movie_id FROM movie_profiles ORDER BY updated_at DESC"
-                : "SELECT movie_id FROM movie_profiles ORDER BY updated_at DESC LIMIT ?";
-            const result = targetCount === "all"
-                ? await env.DB.prepare(query).all()
-                : await env.DB.prepare(query).bind(targetCount).all();
+            const result = await env.DB.prepare(
+                "SELECT movie_id FROM movie_profiles ORDER BY updated_at DESC LIMIT ?"
+            ).bind(targetCount).all();
             rows = result.results || [];
+        } else if (taskType === "create_cards" && targetCount === "all") {
+            const countRow = await env.DB.prepare(`
+                SELECT COUNT(*) AS total FROM (
+                    SELECT CAST(g.tmdb_id AS TEXT) AS movie_id
+                    FROM global_movies g
+                    WHERE g.tmdb_id IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM movie_profiles p
+                        WHERE CAST(p.movie_id AS TEXT) = CAST(g.tmdb_id AS TEXT)
+                      )
+                    GROUP BY CAST(g.tmdb_id AS TEXT)
+                )
+            `).first();
+            directSeedSpec = {
+                count: Number(countRow?.total || 0),
+                selectSql: `
+                    SELECT CAST(g.tmdb_id AS TEXT) AS movie_id
+                    FROM global_movies g
+                    WHERE g.tmdb_id IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM movie_profiles p
+                        WHERE CAST(p.movie_id AS TEXT) = CAST(g.tmdb_id AS TEXT)
+                      )
+                    GROUP BY CAST(g.tmdb_id AS TEXT)
+                `,
+                orderSql: "movie_id"
+            };
         } else {
-            const query = `
+            const result = await env.DB.prepare(`
                 SELECT CAST(g.tmdb_id AS TEXT) AS movie_id
                 FROM global_movies g
                 WHERE g.tmdb_id IS NOT NULL
@@ -598,23 +635,23 @@ if (path === "/bulk/task" && request.method === "POST") {
                     SELECT 1 FROM movie_profiles p
                     WHERE CAST(p.movie_id AS TEXT) = CAST(g.tmdb_id AS TEXT)
                   )
-                ORDER BY g.updated_at DESC
-                ${targetCount === "all" ? "" : "LIMIT ?"}
-            `;
-            const result = targetCount === "all"
-                ? await env.DB.prepare(query).all()
-                : await env.DB.prepare(query).bind(targetCount).all();
+                GROUP BY CAST(g.tmdb_id AS TEXT)
+                ORDER BY MAX(g.updated_at) DESC, movie_id
+                LIMIT ?
+            `).bind(targetCount).all();
             rows = result.results || [];
         }
-        itemPayloads = rows.map(row => ({
-            key: String(row.movie_id),
-            payload: { movieId: String(row.movie_id) }
-        }));
+        if (!directSeedSpec) {
+            itemPayloads = (rows || []).map(row => ({
+                key: String(row.movie_id),
+                payload: { movieId: String(row.movie_id) }
+            }));
+        }
         taskTarget = JSON.stringify({ targetCount });
     }
 
     itemPayloads = [...new Map(itemPayloads.map(entry => [entry.key, entry])).values()];
-    const taskTotal = itemPayloads.length;
+    const taskTotal = directSeedSpec ? directSeedSpec.count : itemPayloads.length;
     const taskId = "task_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
 
     await env.DB.prepare(`
@@ -640,6 +677,35 @@ if (path === "/bulk/task" && request.method === "POST") {
 
     let insertedItems = 0;
     try {
+        if (directSeedSpec && taskTotal > 0) {
+            const seeded = await env.DB.prepare(`
+                INSERT INTO admin_task_items (
+                    id, task_id, item_key, payload_json, status, attempts,
+                    created_at, updated_at
+                )
+                SELECT
+                    ? || ':' || ROW_NUMBER() OVER (ORDER BY ${directSeedSpec.orderSql}),
+                    ?,
+                    CAST(source.movie_id AS TEXT),
+                    json_object('movieId', CAST(source.movie_id AS TEXT)),
+                    'pending', 0, ?, ?
+                FROM (${directSeedSpec.selectSql}) AS source
+            `).bind(taskId, taskId, timestamp, timestamp).run();
+            insertedItems = Number(seeded?.meta?.changes ?? taskTotal);
+            if (insertedItems !== taskTotal) {
+                await env.DB.prepare(`
+                    UPDATE admin_tasks
+                    SET total=?, status=?, finished_at=?, updated_at=?
+                    WHERE id=?
+                `).bind(
+                    insertedItems,
+                    insertedItems ? "pending" : "completed",
+                    insertedItems ? null : timestamp,
+                    timestamp,
+                    taskId
+                ).run();
+            }
+        }
         for (let offset = 0; offset < itemPayloads.length; offset += 50) {
             const chunk = itemPayloads.slice(offset, offset + 50);
             await env.DB.batch(chunk.map((entry, index) => env.DB.prepare(`
