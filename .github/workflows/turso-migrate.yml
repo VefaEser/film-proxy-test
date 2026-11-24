@@ -1,4 +1,3 @@
-
 name: Turso Migration
 
 on:
@@ -11,7 +10,7 @@ on:
         type: boolean
 
 # Aynı Turso veritabanına eşzamanlı migration çalıştırılmasını önle.
-# cancel-in-progress=false: devam eden migration iptal edilmez; sonraki çalışma sırada bekler.
+# Devam eden migration iptal edilmez; sonraki çalışma sırada bekler.
 concurrency:
   group: turso-database-migrations
   cancel-in-progress: false
@@ -25,17 +24,18 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 24
+          package-manager-cache: false
 
       - name: Install migration dependency
-        run: npm install --no-save --no-package-lock @libsql/client@^0.15.15
+        run: npm install --no-save --no-package-lock @libsql/client@^0.18.0
 
       - name: Run migration checks
         env:
