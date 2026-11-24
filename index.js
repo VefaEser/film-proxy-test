@@ -357,7 +357,7 @@ try {
     const appEnv = Object.assign({}, env, { IS_TEST_ENV: true });
     try {
       appEnv.DB = createTursoAdapter(env, true);
-      const result = await processAdminTaskQueue(appEnv, 1);
+      const result = await processAdminTaskQueue(appEnv, 5);
       console.log("[admin-task-queue]", JSON.stringify(result));
     } catch (error) {
       console.error("[admin-task-queue-scheduled]", error?.stack || error);
