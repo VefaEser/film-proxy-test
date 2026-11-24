@@ -1,0 +1,500 @@
+{
+  "generated_at": "2026-11-24",
+  "sources": {
+    "GitHub-test": {
+      "file_count": 77,
+      "files": [
+        {
+          "path": ".github/workflows/d1-migrate.yml",
+          "size": 817,
+          "sha256": "5c4a6fe0f3989491b45c9317c1dd88f5bbfa5f454272b2d8b96db9cae7582cea"
+        },
+        {
+          "path": ".github/workflows/turso-migrate.yml",
+          "size": 1183,
+          "sha256": "20d068db13a270b87e16054dae02b2222fb6ce250c34d807ffb95f9b73d44865"
+        },
+        {
+          "path": "README.md",
+          "size": 38,
+          "sha256": "e1cfa65454e1231a756943b086fe284d62238a5e31c164bca467a8dd718d2e4f"
+        },
+        {
+          "path": "admin-task-queue.js",
+          "size": 7268,
+          "sha256": "98fb2ad3a18ead88e58f1389393313a9d7e61e9927ced4d381af661759e56917"
+        },
+        {
+          "path": "admin.js",
+          "size": 52767,
+          "sha256": "77f388aad375ad87795792de492c909272c1daaee613c5f939c9cc0618593bfd"
+        },
+        {
+          "path": "auth.js",
+          "size": 25278,
+          "sha256": "37d237b8719ed8c056066315753e34d89584a6c03d6c540c2e0fd2778fbe1428"
+        },
+        {
+          "path": "config.js",
+          "size": 19815,
+          "sha256": "cfdfc5563753717ec9c13ae5924a062837f6c6c918903a3e32bc01b0c2d36cd5"
+        },
+        {
+          "path": "cors.js",
+          "size": 733,
+          "sha256": "15e9cd2b399ffa042da6044e9a3ea3125df6ea824f593d2d6bc61ecd2d42c7a4"
+        },
+        {
+          "path": "db.js",
+          "size": 30848,
+          "sha256": "69369f8f491a42232573529f990d8a1b279cc9e4c1d81c0a81aedbe70c5d5d1b"
+        },
+        {
+          "path": "enrich.js",
+          "size": 13182,
+          "sha256": "5ec2f39dab165b971d47cf0243d03f56a14e4eb43bc4216fe022188e1786b6fc"
+        },
+        {
+          "path": "fields.config.js",
+          "size": 18960,
+          "sha256": "7b7c6d4d99e935f86dbd9f5c483cdfabb425c7cf5f699156ce3dea06d1c99190"
+        },
+        {
+          "path": "filters.js",
+          "size": 29560,
+          "sha256": "66428cabde881ed2331b05ff4f4196cfe3b36fca323cc9daef949a2abcfb56d1"
+        },
+        {
+          "path": "index.js",
+          "size": 23827,
+          "sha256": "46dd50279c52d4faf0fe34d97318c77160a81920df691a9f47ee1983df96c456"
+        },
+        {
+          "path": "llm.js",
+          "size": 23075,
+          "sha256": "72b2b693c429a81e5827cc5bdc0b55cf291be4d5a33688caca23ef80b901c788"
+        },
+        {
+          "path": "migrations/0001_create_movie_profiles.sql",
+          "size": 630,
+          "sha256": "1003f6100d8bd0f6e9243c052753fec9c80231ad58d174c8642719b20cf8abee"
+        },
+        {
+          "path": "migrations/0002_hardening.sql",
+          "size": 209,
+          "sha256": "e2b93bd5f56cc654cf48fcddad195025cb06ed5f405c3ad0569e92dcf73d5683"
+        },
+        {
+          "path": "migrations/0003_llm_admin.sql",
+          "size": 5124,
+          "sha256": "b2376e622d6a55c270cdac0b903d1559fe8dc0b2569bafa7f68fed40ddd60602"
+        },
+        {
+          "path": "migrations/0004_filter_verdicts.sql",
+          "size": 1301,
+          "sha256": "201bdad9b77f9381043177e68fdef609a4af4320ccd23eef6b4e7aa7bcb8bcb0"
+        },
+        {
+          "path": "migrations/0005_clear_bad_detail_fields.sql",
+          "size": 319,
+          "sha256": "ebc48934eea5f0241ae5e0106a9f536e36a6dc29b73e694e7d9dddac50b82fca"
+        },
+        {
+          "path": "migrations/0006_static_options.sql",
+          "size": 2582,
+          "sha256": "bc9a0e66ed9c7740f98e4e75b2f6e7c359c9ff1efe740ecfc1ac924766dab3f6"
+        },
+        {
+          "path": "migrations/0007_movie_lists.sql",
+          "size": 269,
+          "sha256": "b7c19bcf2e89037f4d2ea130afb6755cf12a9586ccf7dee7fd1dde88cabd6e70"
+        },
+        {
+          "path": "migrations/0008_metatake_cache.sql",
+          "size": 223,
+          "sha256": "54ffcc68150520f847abd0f29f45990be2eef22f54729ee61e05b3878aeba64d"
+        },
+        {
+          "path": "migrations/0009_filmmap_cache.sql",
+          "size": 683,
+          "sha256": "877b923ae0ca0844c6961a564650fa9bbae0b4c29f005ca209b77aaf43869a9f"
+        },
+        {
+          "path": "migrations/0010_metatake_extended.sql",
+          "size": 437,
+          "sha256": "61a24bb0ad195337f4398ddeca94b9a50c4c82ba9a55d1c752e15a83017b3bf3"
+        },
+        {
+          "path": "migrations/0011_dead_keys_model.sql",
+          "size": 681,
+          "sha256": "20e8c0857cb2ae2d4d980acf606dd94e6d4ce324e777ceca86068cf3b7b2847c"
+        },
+        {
+          "path": "migrations/0012_clear_poster_and_people_cache.sql",
+          "size": 867,
+          "sha256": "78c976c7bdb9dccf37f8093b7bf49c1af8fb81efb76b251c801da1aa0e585c65"
+        },
+        {
+          "path": "migrations/0013_omdb_poster_reset.sql",
+          "size": 515,
+          "sha256": "33468ba0fcdae7580375e1dac610204cffbc6058c595a81442b2cb2683d6b2e0"
+        },
+        {
+          "path": "migrations/0014_location_count_cleanup.sql",
+          "size": 679,
+          "sha256": "4d617c8e23c33ef2f261b122c1686bace9da4b57c62a0874c23222efb0ae1753"
+        },
+        {
+          "path": "migrations/0015_empty.sql",
+          "size": 1,
+          "sha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+        },
+        {
+          "path": "migrations/0016_users.sql",
+          "size": 1533,
+          "sha256": "4dbb43e5ccb7addd5b7da3e60b95d2d5dab30b50545034bf00901ac26c042f66"
+        },
+        {
+          "path": "migrations/0017_user_movies_votes.sql",
+          "size": 1637,
+          "sha256": "f8427d120f4fe12d4afec653961aaa4a9f00f17c24a44dce8994f5f7fc061750"
+        },
+        {
+          "path": "migrations/0018_comments_messages.sql",
+          "size": 1474,
+          "sha256": "474e228cbffb4e119620cb9b780c9d8213f6535548cf95fe86acb807633be6a9"
+        },
+        {
+          "path": "migrations/0019_color_and_subtitle_fields.sql",
+          "size": 1121,
+          "sha256": "90dd3f715e2f34bf28f83c0a0b215cdebefd4c30a8a7b8c003abeeed805b1d9c"
+        },
+        {
+          "path": "migrations/0020_email_verify.sql",
+          "size": 297,
+          "sha256": "22123aab6a4758714012176d929075eed5a69d4948082ae24f772418e7dcb068"
+        },
+        {
+          "path": "migrations/0021_security.sql",
+          "size": 930,
+          "sha256": "7a646f529138e37ab1e1e42ef9913ec76dd021c01ab2114925ca5a56f39e6bf9"
+        },
+        {
+          "path": "migrations/0022_user_movies_url.sql",
+          "size": 245,
+          "sha256": "4ebbb6da262a88ca74bc78ac9a6c59602b0c26aab1813ebfe6bf536d97c603b7"
+        },
+        {
+          "path": "migrations/0023_user_movies_tmdb_id.sql",
+          "size": 351,
+          "sha256": "2ab27dca801a6f47641db5527366ec4a6ad8a78ae9dd6825715ee5dfe8916786"
+        },
+        {
+          "path": "migrations/0024_user_rating.sql",
+          "size": 257,
+          "sha256": "384b7d1843a0fc44ed9bbb6262ae97e5e8fbc3671294e7f62f70dcab0ebe7923"
+        },
+        {
+          "path": "migrations/0025_dedupe_user_movies.sql",
+          "size": 362,
+          "sha256": "a2c80aa81693b920922cb21d85b5dc3145b4eb7914a7c213db25ed4e4f7e7acd"
+        },
+        {
+          "path": "migrations/0026_manual_movie_admin.sql",
+          "size": 209,
+          "sha256": "862c738585cb46c91e805e70e785e6e2b32ead2f22228aa039c65c1ee5348abf"
+        },
+        {
+          "path": "migrations/0027_filter_info_rename.sql",
+          "size": 5014,
+          "sha256": "64c132ae64a23b1cdd29f791ca83feed9e88bc9faf56a67e25115e4b46b7a861"
+        },
+        {
+          "path": "migrations/0028_list_settings_and_rating.sql",
+          "size": 993,
+          "sha256": "4e4128de1f4d2e4dce11c14f669ff951ea5a77d7ecad3e1b1485479c4ebba6a6"
+        },
+        {
+          "path": "migrations/0029_awards_expand.sql",
+          "size": 3678,
+          "sha256": "983b1b179b4c54964e20f23d0eda4fa3419fcc5b67d754be06180878561b7e8a"
+        },
+        {
+          "path": "migrations/0030_clean_character_traits.sql",
+          "size": 579,
+          "sha256": "9c7997420369b2af71fd56afc18556c14e67dee6f2cdd24d191193a155b7ca55"
+        },
+        {
+          "path": "migrations/0031_rating_visibility.sql",
+          "size": 514,
+          "sha256": "84854a58cda96e91b9d63255f313af8c2b2b03e327ded1f49ed1e3947fc22097"
+        },
+        {
+          "path": "migrations/0032_normalize_imdb_id.sql",
+          "size": 850,
+          "sha256": "7b5288fb889d518cc2f1baec2994f04b84e63dea753ec9b0bf7c47a483b7abbc"
+        },
+        {
+          "path": "migrations/0033_story_dimensions_reclassify.sql",
+          "size": 1642,
+          "sha256": "28efc349792d131967d3c9ea4f9784bc494e85e2652dcd3407b8e303d2fb4304"
+        },
+        {
+          "path": "migrations/0034_visual_profiles.sql",
+          "size": 3685,
+          "sha256": "bbe4913c2f9e53f1c2f4dbb3e300aa71cd26c74e485c7a06f3b8e449d143b545"
+        },
+        {
+          "path": "migrations/0035_color_style_rename.sql",
+          "size": 2340,
+          "sha256": "afc7444c0279ab6ba283393a60603f0672f94eb98becfb58daef1af633ed841f"
+        },
+        {
+          "path": "migrations/0036_add_altin_portakal_award.sql",
+          "size": 885,
+          "sha256": "f3bddb5014fa323abcda99e2601b5ea7d7919d44204d548c5738726b8a728175"
+        },
+        {
+          "path": "migrations/0037_llm_telemetry.sql",
+          "size": 1661,
+          "sha256": "3bdead99610d6b4a78754e572993c0c4f20435a44c28a550052adf837aa5ed52"
+        },
+        {
+          "path": "migrations/0038_taxonomy_split.sql",
+          "size": 9456,
+          "sha256": "2b3980c99d6e73edcdbe05114f34145dd6d004bdf1bbc816cdb682e4777612c9"
+        },
+        {
+          "path": "migrations/0039_taxonomy_sound_fix.sql",
+          "size": 3092,
+          "sha256": "c78998fca2e50fd43f88049b58c5c862b558479ce2b4be8a5358cd31ffed1dbd"
+        },
+        {
+          "path": "migrations/0040_taxonomy_v1.sql",
+          "size": 721,
+          "sha256": "1479a2c678e2f6bd590db13fc9cb981920e9ab2001d1fe03f28de3cf03191b44"
+        },
+        {
+          "path": "migrations/0041_global_movies.sql",
+          "size": 1544,
+          "sha256": "aa18065c2d8cfeabfd2709d2b682c3ce96cc624e7f06a09af6a136e0084ec3fe"
+        },
+        {
+          "path": "migrations/0042_import_jobs.sql",
+          "size": 1452,
+          "sha256": "a5ebb5674959611708f2570aee9d98844ddc5f2a852361e33b19ef4e62554df0"
+        },
+        {
+          "path": "migrations/0043_admin_tasks.sql",
+          "size": 779,
+          "sha256": "ba0674a65fbcf8808d4b04586e2f4a129446daa65ccc779b23a994506a612cc1"
+        },
+        {
+          "path": "migrations/0044_rating_only.sql",
+          "size": 1737,
+          "sha256": "afaae677b9e06c7daadce8b31a3c71a6f4d3f6d6ac27b4e21b638d7ba00c57c1"
+        },
+        {
+          "path": "migrations/0045_resumable_csv_imports.sql",
+          "size": 1877,
+          "sha256": "1bab77a6815d5fb75326c0b67f215fcb4b7cde786203ef5e82fb060824c4afab"
+        },
+        {
+          "path": "migrations/0046_admin_operation_audit.sql",
+          "size": 962,
+          "sha256": "13f0611a7e395558f399b9ed8fc09f4d98ca520c6deaa96d546239ca4e185569"
+        },
+        {
+          "path": "migrations/0047_story_dimensions_remove_concept.sql",
+          "size": 335,
+          "sha256": "058856a482e01ee1a1f857df4cc4d8a7f28d70771d2846e35b84484c8474f161"
+        },
+        {
+          "path": "migrations/0048_admin_task_items.sql",
+          "size": 933,
+          "sha256": "0e491833415360f75c09d2a483e539d8adffefb55ddbac2561e21c99bb86157c"
+        },
+        {
+          "path": "package.json",
+          "size": 81,
+          "sha256": "9daca3d97af1a5863415c9d8432d0c0c3a9b1465e145569f0fd6847e1831ee6b"
+        },
+        {
+          "path": "pagination.js",
+          "size": 227,
+          "sha256": "1ae38b1dbee23e554941d59324bbb093678691d4afc5e5b90d86e77efb1849c7"
+        },
+        {
+          "path": "research.js",
+          "size": 50854,
+          "sha256": "2bea3396aeff6f003d076363d47fe0757b65dc1f5ec091a5a2919dac6f1f718a"
+        },
+        {
+          "path": "scripts/turso-migrate.mjs",
+          "size": 7342,
+          "sha256": "607932906e691c296e1e11b51a1339e7457ee88a25da529e98856f6353bbf979"
+        },
+        {
+          "path": "social.js",
+          "size": 9588,
+          "sha256": "9b2a974f1a791908894298f73ee390a3ed056d612c03f887b37e1932210e2f17"
+        },
+        {
+          "path": "sources.js",
+          "size": 28029,
+          "sha256": "ddae9f1012a0303a0a9dbdb91c905fc04882318811262316199db03729558dd1"
+        },
+        {
+          "path": "taxonomy.config.js",
+          "size": 8034,
+          "sha256": "dc9776450671b83edc7efc097f923d0d418e538c8024c0b0adb0a96e0e91cc53"
+        },
+        {
+          "path": "taxonomy.keywords.js",
+          "size": 23761,
+          "sha256": "f53f4e087a6c04fc9b9c400ed2dea39883bc7726379c78ecc654acba9d520374"
+        },
+        {
+          "path": "taxonomy.subgenres.js",
+          "size": 35184,
+          "sha256": "a7b16e786379596ae2699aa6f085f03e1030d72d7ba2af76b61f698d07099aa1"
+        },
+        {
+          "path": "taxonomy.themes.js",
+          "size": 28254,
+          "sha256": "33c9c8f35cd582283a09fab8d4a02668f34e9f375be7946ac49f39ac08328b05"
+        },
+        {
+          "path": "taxonomy.tropes.js",
+          "size": 63634,
+          "sha256": "44407cd81f5a510dfac0cb64f47237df89aa862c8afd67f847d2b6f7b039a576"
+        },
+        {
+          "path": "turso-adapter.js",
+          "size": 3313,
+          "sha256": "402c6611eba369c0b859c0ed8dd45c296bc17abcca8e881d05ba8f4bbd006fdb"
+        },
+        {
+          "path": "users.js",
+          "size": 76302,
+          "sha256": "cae2b3c54b9e5e15a3fa55a9466d3a4aedcb1f477b726a0cd84bfce1796fc782"
+        },
+        {
+          "path": "worker-core.js",
+          "size": 353,
+          "sha256": "262ba63b20ad89d59422b90b713d1ce36f8ae34244c52a189dfb8307be1a36ef"
+        },
+        {
+          "path": "wrangler.json",
+          "size": 470,
+          "sha256": "12dcbea933c9c0a372bfd27769e51e85c9a1320b4dff45a8904da58bcd739a57"
+        }
+      ]
+    },
+    "HuggingFace-test": {
+      "file_count": 20,
+      "files": [
+        {
+          "path": ".gitattributes",
+          "size": 1519,
+          "sha256": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361"
+        },
+        {
+          "path": "README.md",
+          "size": 192,
+          "sha256": "959ae8b179700fd06dea94cc753954bc28c9e351b998311ba092c6846ea81e58"
+        },
+        {
+          "path": "app-2.js",
+          "size": 37962,
+          "sha256": "c6e8044df206158f99174e9d2ec5b99ead9e08085ac41e6451152c0c81bd958f"
+        },
+        {
+          "path": "app-defs.js",
+          "size": 43867,
+          "sha256": "bec4893bb3638cf1e5847df933fdab5fd1ae3cb5b15438e15c05f505d0824ce6"
+        },
+        {
+          "path": "app-ms.js",
+          "size": 17093,
+          "sha256": "d68e9edda299ae1ded48b281f25fa2343a8737ba8a05b788c0be830d72d5826f"
+        },
+        {
+          "path": "app-priorities.js",
+          "size": 11070,
+          "sha256": "403f14151a0defa685cfedf4785e8136ec5718f710a5e3a137b528f5aa486e69"
+        },
+        {
+          "path": "app-render.js",
+          "size": 31563,
+          "sha256": "4eb4ab6fac393e2fbb9f41ed5d3808da8c9f90dd88e9ce29af008231772b2505"
+        },
+        {
+          "path": "app-taxonomy.js",
+          "size": 11446,
+          "sha256": "74cec492c406c2fbe7faaadfb3582c6d90ac911efe7d9d8db7c340e31fb7c4dd"
+        },
+        {
+          "path": "app-taxonomy.subgenres.js",
+          "size": 6315,
+          "sha256": "2c17cc40f9569024e9cadb5cac228adfb355bfe7cc22ef93a9f86c0a57bb2ff9"
+        },
+        {
+          "path": "app-taxonomy.themes.js",
+          "size": 6520,
+          "sha256": "e7fef00148de64768d550787047d739e2664a7cfa54d00de58cdb72d368ae22a"
+        },
+        {
+          "path": "app-taxonomy.tropes.js",
+          "size": 14916,
+          "sha256": "acf003bb9207152b6d4c5f745cc3cb31f011c779f3dea208c031b114305bb5a3"
+        },
+        {
+          "path": "appadmin.js",
+          "size": 21672,
+          "sha256": "5a9264290a7158a3f89719bb17e140a4ee5806727a8e466db2a261c15f6b0949"
+        },
+        {
+          "path": "bootcheck.js",
+          "size": 7396,
+          "sha256": "cba31abe6722602897a1c2cbf71543a538ce48b9ba0d6c0e892b311c6752012e"
+        },
+        {
+          "path": "diagnostics.js",
+          "size": 14220,
+          "sha256": "df381fd1880789445ac1609d1070c18687215268b019b4311b585e1f719c9c06"
+        },
+        {
+          "path": "index.html",
+          "size": 34165,
+          "sha256": "06e76ea37b444a771bfd57e820e8677fa882c3cd7dbe372c785f2a3ffb71663f"
+        },
+        {
+          "path": "styles.css",
+          "size": 21183,
+          "sha256": "2817ecbf4b337df49ae6ad35ed2270b958c44aed80ffab96798e05fecf86c4ea"
+        },
+        {
+          "path": "user-ui1.js",
+          "size": 19096,
+          "sha256": "f1c6f4d3a8ecfd0c6c591073ada9853ad37fe0fcde98e5512af40d74f02a26d5"
+        },
+        {
+          "path": "user-ui2.js",
+          "size": 34600,
+          "sha256": "e27a8b7ba1d3c249e77b0a54a5805e0f7d84139a95c3c2fe0be601e967c2e91e"
+        },
+        {
+          "path": "user-ui3.js",
+          "size": 67387,
+          "sha256": "7aa782498dfd8e1780d782b88151ae3ef584bcfe15bd80e26dfc28b750b6b464"
+        },
+        {
+          "path": "user-ui4.js",
+          "size": 43399,
+          "sha256": "2e1a75c672f651b4bbc0b1336b6f74d8acff9336d2f10b74d3b67a191493dd33"
+        }
+      ]
+    }
+  }
+}
