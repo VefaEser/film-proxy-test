@@ -7,6 +7,7 @@ import { handleAuth, getCurrentUserWithAdminBridge } from "./auth.js";
 import { handleUser } from "./users.js";
 import { handleSocial } from "./social.js";
 import { handleAdmin } from "./admin.js";
+import { processAdminTaskQueue } from "./admin-task-queue.js";
 import {
   GEMINI_MODEL_DEFAULT, GROQ_MODEL_DEFAULT, buildGeminiChain, buildGroqChain,
   isAdmin, response, jsonError, omdb, tmdbRoute, handleImages, handleMovieDetails, handleResearchStream,
@@ -27,15 +28,18 @@ async function requireAdminEither(env, request) {
   return null;
 }
 
-async function requireCardEditor(env, request) {
+async function requireCardPermission(env, request, requiredPermission) {
   const viaBearer = isAdmin(request, env);
   if (viaBearer) return { via: "bearer" };
   const user = await getCurrentUserWithAdminBridge(env, request);
   if (!user) return null;
   if (user.is_admin) return { via: "cookie", user };
+  if (!requiredPermission) return null;
   try {
-    const { results } = await env.DB.prepare("SELECT permission FROM user_permissions WHERE user_id = ? AND permission IN ('refresh_movie','csv_import_cards','field_unlock') LIMIT 1").bind(user.user_id).all();
-    if ((results || []).length) return { via: "permission", user };
+    const row = await env.DB.prepare(
+      "SELECT 1 AS ok FROM user_permissions WHERE user_id = ? AND permission = ? LIMIT 1"
+    ).bind(user.user_id, requiredPermission).first();
+    if (row?.ok === 1) return { via: "permission", user };
   } catch {}
   return null;
 }
@@ -94,12 +98,13 @@ async function handleRequest(request, env, ctx) {
         groqKeys: [!!env.GROQ_API_KEY_1, !!env.GROQ_API_KEY_2, !!env.GROQ_API_KEY_3],
         geminiKeys: [!!env.GEMINI_API_KEY_1, !!env.GEMINI_API_KEY_2, !!env.GEMINI_API_KEY_3],
         adminToken: !!env.ADMIN_TOKEN, metatake: true, filmmap: true, staticOptions: true,
-        db: !!((env.IS_TEST_ENV ? env.TEST_TURSO_DATABASE_URL : env.TURSO_DATABASE_URL) &&
-               (env.IS_TEST_ENV ? env.TEST_TURSO_AUTH_TOKEN : env.TURSO_AUTH_TOKEN)),
-        dbConfigured: !!((env.IS_TEST_ENV ? env.TEST_TURSO_DATABASE_URL : env.TURSO_DATABASE_URL) &&
-                         (env.IS_TEST_ENV ? env.TEST_TURSO_AUTH_TOKEN : env.TURSO_AUTH_TOKEN)),
-        dbEnvironment: env.IS_TEST_ENV ? "test" : "live",
-        dbConnected: await (async () => { try { return Number((await env.DB.prepare("SELECT 1 AS ok").first())?.ok) === 1; } catch { return false; } })(),
+        d1: false,
+        d1Disabled: true,
+        turso: !!((env.IS_TEST_ENV ? env.TEST_TURSO_DATABASE_URL : env.TURSO_DATABASE_URL) &&
+          (env.IS_TEST_ENV ? env.TEST_TURSO_AUTH_TOKEN : env.TURSO_AUTH_TOKEN)),
+        tursoConfigured: !!((env.IS_TEST_ENV ? env.TEST_TURSO_DATABASE_URL : env.TURSO_DATABASE_URL) &&
+          (env.IS_TEST_ENV ? env.TEST_TURSO_AUTH_TOKEN : env.TURSO_AUTH_TOKEN)),
+        tursoConnected: await (async () => { try { return Number((await env.DB.prepare("SELECT 1 AS ok").first())?.ok) === 1; } catch { return false; } })(),
         dbType: "turso", defaultMinImdbVotes: 100, keyHealth
       });
     }
@@ -131,11 +136,11 @@ async function handleRequest(request, env, ctx) {
     if (url.pathname === "/admin/filter_info" && request.method === "GET") return response({ config: await getFilterInfoAll(env) });
     if (url.pathname === "/admin/stats" && request.method === "GET") { const auth = await requireAdminEither(env, request); if (!auth) return jsonError("Yetkisiz.", 401); return response({ stats: await getLlmStats(env), deadKeys: await getActiveDeadKeys(env), keyHealth: (() => { try { return getKeyHealth(); } catch { return {}; } })() }); }
 
-    // === FAZ G: /admin/d1-diag — anlık teşhis (yalnızca SELECT, D1 yazma kotası tüketmez) ===
-    if (url.pathname === "/admin/d1-diag" && request.method === "GET") {
+    // Turso teşhisi (geriye uyumluluk için eski /admin/d1-diag yolu da kabul edilir).
+    if (["/admin/turso-diag", "/admin/d1-diag"].includes(url.pathname) && request.method === "GET") {
       const auth = await requireAdminEither(env, request);
       if (!auth) return jsonError("Yetkisiz.", 401);
-      if (!env.DB) return jsonError("D1 bağlantısı yok", 503);
+      if (!env.DB) return jsonError("Turso bağlantısı yok", 503);
       const nowSec = Math.floor(Date.now() / 1000);
       const windowSec = 24 * 3600;
       const since = nowSec - windowSec;
@@ -180,14 +185,7 @@ async function handleRequest(request, env, ctx) {
       try { latest.filter_verdicts = (await env.DB.prepare("SELECT MAX(created_at) AS m FROM filter_verdicts").first())?.m || null; } catch {}
       try { latest.movie_profiles = (await env.DB.prepare("SELECT MAX(updated_at) AS m FROM movie_profiles").first())?.m || null; } catch {}
       try { latest.movie_profile_fields = (await env.DB.prepare("SELECT MAX(fetched_at) AS m FROM movie_profile_fields").first())?.m || null; } catch {}
-      const D1_FREE_WRITE_LIMIT = 100000;
-      const warnings = [];
-      const threshold = D1_FREE_WRITE_LIMIT * 0.3;
-      if (writes24h.llm_calls != null && writes24h.llm_calls > threshold) warnings.push(`llm_calls son 24 saatte ${writes24h.llm_calls} yazma yaptı (limitin %${Math.round(writes24h.llm_calls / D1_FREE_WRITE_LIMIT * 100)}'i)`);
-      if (writes24h.llm_rpm_tracker != null && writes24h.llm_rpm_tracker > threshold) warnings.push(`llm_rpm_tracker son 24 saatte ${writes24h.llm_rpm_tracker} yazma yaptı (limitin %${Math.round(writes24h.llm_rpm_tracker / D1_FREE_WRITE_LIMIT * 100)}'i)`);
-      if (writes24h.filter_verdicts != null && writes24h.filter_verdicts > threshold) warnings.push(`filter_verdicts son 24 saatte ${writes24h.filter_verdicts} yazma yaptı (limitin %${Math.round(writes24h.filter_verdicts / D1_FREE_WRITE_LIMIT * 100)}'i)`);
-      if (writes24h.movie_profile_fields != null && writes24h.movie_profile_fields > threshold) warnings.push(`movie_profile_fields son 24 saatte ${writes24h.movie_profile_fields} yazma yaptı (limitin %${Math.round(writes24h.movie_profile_fields / D1_FREE_WRITE_LIMIT * 100)}'i)`);
-      if (total > D1_FREE_WRITE_LIMIT) warnings.push(`Toplam yazma (${total}) günlük limiti (${D1_FREE_WRITE_LIMIT}) aşmış görünüyor.`);
+      const warnings = []; // Turso: günlük yazma limiti yok
       return response({
         ok: true,
         via: auth.via,
@@ -199,7 +197,6 @@ async function handleRequest(request, env, ctx) {
         taxonomy_filter_rows: taxonomyFilterRows,
         latest_timestamps: latest,
         hf_token_configured: !!env.HF_TOKEN,
-        d1_free_tier_write_limit: D1_FREE_WRITE_LIMIT,
         warnings,
         errors: Object.keys(errors).length ? errors : undefined
       });
@@ -208,10 +205,13 @@ async function handleRequest(request, env, ctx) {
     if (url.pathname === "/admin/dead_keys" && request.method === "DELETE") { const auth = await requireAdminEither(env, request); if (!auth) return jsonError("Yetkisiz.", 401); if (env.DB) await env.DB.prepare("DELETE FROM dead_keys").run(); deadKeysCache.ts = 0; return response({ ok: true }); }
 
     if (url.pathname === "/admin/movie-profiles" && request.method === "GET") {
-      const auth = await requireAdminEither(env, request);
-      if (!auth) return jsonError("Yetkisiz.", 401);
-      const page = Math.max(1, parseInt(url.searchParams.get("page") || "1"));
-      const pageSize = 20;
+      const auth = await requireCardPermission(env, request, "db_cards_view");
+      if (!auth) return jsonError("Bu kart listesini görüntüleme yetkiniz yok.", 403);
+      const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+      const requestedPageSize = parseInt(url.searchParams.get("pageSize") || "10", 10);
+      const pageSize = Number.isFinite(requestedPageSize)
+        ? Math.min(100, Math.max(10, Math.floor(requestedPageSize / 10) * 10))
+        : 10;
       const offset = (page - 1) * pageSize;
       const { results } = await env.DB.prepare(`
         SELECT movie_id,
@@ -224,7 +224,7 @@ async function handleRequest(request, env, ctx) {
       return response({ movies: results || [], total: countRows[0]?.c || 0, page, pageSize });
     }
     if (url.pathname === "/admin/movie-profiles" && request.method === "POST") {
-      const auth = await requireCardEditor(env, request);
+      const auth = await requireCardPermission(env, request, "db_cards_bulk_open");
       if (!auth) return jsonError("Yetkisiz.", 401);
       let body; try { body = await request.json(); } catch { return jsonError("Geçersiz JSON.", 400); }
       const imdbId = String(body.imdbId || "").replace(/^tt/, "").trim();
@@ -247,7 +247,7 @@ async function handleRequest(request, env, ctx) {
       } catch (e) { return jsonError("Kart oluşturulamadı: " + (e.message || e), 500); }
     }
     if (url.pathname.match(/^\/admin\/movie-profiles\/\d+$/) && request.method === "PUT") {
-      const auth = await requireCardEditor(env, request);
+      const auth = await requireCardPermission(env, request, "field_unlock");
       if (!auth) return jsonError("Yetkisiz.", 401);
       const movieId = url.pathname.split("/").pop();
       let body; try { body = await request.json(); } catch { return jsonError("Geçersiz JSON.", 400); }
@@ -270,7 +270,7 @@ async function handleRequest(request, env, ctx) {
       return response({ movie: safeJSON(row.data_json, {}) || {} });
     }
     if (url.pathname.match(/^\/admin\/movie-profiles\/\d+$/) && request.method === "DELETE") {
-      const auth = await requireCardEditor(env, request);
+      const auth = await requireCardPermission(env, request, "db_cards_bulk_delete");
       if (!auth) return jsonError("Yetkisiz.", 401);
       const movieId = url.pathname.split("/").pop();
       await env.DB.prepare("DELETE FROM movie_profiles WHERE movie_id = ?").bind(movieId).run();
@@ -280,12 +280,15 @@ async function handleRequest(request, env, ctx) {
     }
 
     if (url.pathname === "/admin/csv-cards" && request.method === "GET") {
-      const auth = await requireAdminEither(env, request);
-      if (!auth) return jsonError("Yetkisiz.", 401);
-      const page = Math.max(1, parseInt(url.searchParams.get("page") || "1"));
-      const pageSize = 20;
+      const auth = await requireCardPermission(env, request, "csv_cards_view");
+      if (!auth) return jsonError("CSV kart listesini görüntüleme yetkiniz yok.", 403);
+      const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+      const requestedPageSize = parseInt(url.searchParams.get("pageSize") || "10", 10);
+      const pageSize = Number.isFinite(requestedPageSize)
+        ? Math.min(100, Math.max(10, Math.floor(requestedPageSize / 10) * 10))
+        : 10;
       const offset = (page - 1) * pageSize;
-      const { results } = await env.DB.prepare(`SELECT um.movie_id, um.imdb_id, um.tmdb_id, um.title_original, um.title_tr, um.year, um.imdb_rating, um.user_rating, um.list_type, um.source, um.updated_at, u.username FROM user_movies um JOIN users u ON u.id = um.user_id WHERE um.source = 'csv' ORDER BY um.updated_at DESC LIMIT ? OFFSET ?`).bind(pageSize, offset).all();
+      const { results } = await env.DB.prepare(`SELECT um.user_id, um.movie_id, um.imdb_id, um.tmdb_id, um.title_original, um.title_tr, um.year, um.imdb_rating, um.user_rating, um.list_type, um.source, um.updated_at, u.username FROM user_movies um JOIN users u ON u.id = um.user_id WHERE um.source = 'csv' ORDER BY um.updated_at DESC LIMIT ? OFFSET ?`).bind(pageSize, offset).all();
       const { results: countRows } = await env.DB.prepare("SELECT COUNT(*) AS c FROM user_movies WHERE source = 'csv'").all();
       return response({ cards: results || [], total: countRows[0]?.c || 0, page, pageSize });
     }
@@ -347,5 +350,18 @@ try {
       statusText: response.statusText,
       headers: newHeaders
     });
+  },
+
+  async scheduled(controller, env, ctx) {
+    // Bu Worker yalnızca TEST Turso dalını kullanır.
+    const appEnv = Object.assign({}, env, { IS_TEST_ENV: true });
+    try {
+      appEnv.DB = createTursoAdapter(env, true);
+      const result = await processAdminTaskQueue(appEnv, 1);
+      console.log("[admin-task-queue]", JSON.stringify(result));
+    } catch (error) {
+      console.error("[admin-task-queue-scheduled]", error?.stack || error);
+      throw error;
+    }
   }
 };

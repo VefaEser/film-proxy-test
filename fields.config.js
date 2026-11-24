@@ -17,7 +17,7 @@ export const CHARACTER_TRAITS_LIST = [
 ];
 export const STORY_DIMENSIONS_LIST = [
   "has_sequel", "is_sequel", "series_sequel", "series_prequel", "series_spinoff",
-  "concept", "reboot", "film_franchise", "remake",
+  "reboot", "film_franchise", "remake",
   "similar_script_version", "same_plot_diff_script", "same_plot_diff_angle"
 ];
 

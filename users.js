@@ -140,39 +140,85 @@ function normalizeTitle(t) {
 
 // === FAZ 8 C-2: Çoklu TMDB adayı skorlama ===
 function pickBestTmdbCandidate(candidates, meta) {
-  if (!Array.isArray(candidates) || !candidates.length) return { picked: null, reason: "no-candidate", candidates };
-  if (candidates.length === 1) return { picked: candidates[0], reason: "single", candidates };
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return { picked: null, reason: "no-candidate", candidates };
+  }
 
-  const targetYear = meta.year ? parseInt(meta.year) : null;
+  const targetYear = meta.year ? parseInt(meta.year, 10) : null;
   const targetTitles = [meta.title_original, meta.title_tr, meta.title]
     .filter(Boolean).map(normalizeTitle).filter(Boolean);
 
-  const scored = candidates.map(c => {
+  const scored = candidates.map(candidate => {
     let score = 0;
-    const cYear = parseInt(String(c.release_date || "").slice(0, 4));
-    if (targetYear && cYear) {
-      if (targetYear === cYear) score += 100;
-      else if (Math.abs(targetYear - cYear) === 1) score += 30;
-      else if (Math.abs(targetYear - cYear) <= 2) score += 10;
-    }
+    const candidateYear = parseInt(String(candidate.release_date || "").slice(0, 4), 10);
+    const candidateTitles = [
+      normalizeTitle(candidate.original_title || ""),
+      normalizeTitle(candidate.title || "")
+    ].filter(Boolean);
+
+    const exactTitle = targetTitles.length > 0 &&
+      targetTitles.some(title => candidateTitles.includes(title));
+    const partialTitle = targetTitles.length > 0 &&
+      targetTitles.some(title => candidateTitles.some(candidateTitle =>
+        candidateTitle.includes(title) || title.includes(candidateTitle)
+      ));
+
     if (targetTitles.length) {
-      const cTitle = normalizeTitle(c.original_title || c.title);
-      const cTitleAlt = normalizeTitle(c.title);
-      for (const t of targetTitles) {
-        if (cTitle === t || cTitleAlt === t) score += 200;
-        else if (cTitle.includes(t) || t.includes(cTitle)) score += 80;
-        else if (cTitleAlt.includes(t) || t.includes(cTitleAlt)) score += 60;
+      if (exactTitle) score += 200;
+      else if (partialTitle) score += 60;
+      else score -= 150;
+    }
+
+    let yearMismatch = false;
+    if (targetYear && candidateYear) {
+      const difference = Math.abs(targetYear - candidateYear);
+      if (difference === 0) score += 100;
+      else if (difference === 1) score += 30;
+      else if (difference === 2) score += 10;
+      else {
+        score -= 150;
+        yearMismatch = true;
       }
     }
-    return { candidate: c, score };
+
+    return {
+      candidate,
+      score,
+      exactTitle,
+      partialTitle,
+      yearMismatch
+    };
   });
+
   scored.sort((a, b) => b.score - a.score);
 
-  // Benzersiz en yüksek skor (>=100) → otomatik seç
-  if (scored[0].score >= 100 && (scored.length === 1 || scored[1].score < scored[0].score)) {
-    return { picked: scored[0].candidate, reason: "scored", candidates };
+  // Even a single result must agree with supplied title/year metadata.
+  if (scored.length === 1) {
+    const only = scored[0];
+    const hasMetadata = targetTitles.length > 0 || !!targetYear;
+    const hasTitleConflict = targetTitles.length > 0 &&
+      !only.exactTitle && !only.partialTitle;
+    if (only.yearMismatch || hasTitleConflict) {
+      return { picked: null, reason: "metadata-mismatch", candidates };
+    }
+    return {
+      picked: only.candidate,
+      reason: hasMetadata ? "single-validated" : "single-no-metadata",
+      candidates
+    };
   }
-  return { picked: null, reason: "ambiguous", candidates };
+
+  const best = scored[0];
+  const second = scored[1];
+  const uniqueWinner = best.score >= 100 && best.score > second.score;
+  const metadataConflict = best.yearMismatch ||
+    (targetTitles.length > 0 && !best.exactTitle && !best.partialTitle);
+
+  if (uniqueWinner && !metadataConflict) {
+    return { picked: best.candidate, reason: "scored-validated", candidates };
+  }
+
+  return { picked: null, reason: "ambiguous-or-mismatch", candidates };
 }
 
 function parseCsv(text) {
@@ -237,17 +283,29 @@ async function importCsvSessionStart(env, userId, body) {
   const totalRows = Number(body.totalRows);
   if (!["watched", "want", "wont"].includes(listType)) throw Object.assign(new Error("Geçersiz liste türü"), { status: 400 });
   if (!/^[a-f0-9]{64}$/.test(fileHash)) throw Object.assign(new Error("Dosya parmak izi geçersiz"), { status: 400 });
-  if (!Number.isSafeInteger(totalRows) || totalRows < 1 || totalRows > 500000) throw Object.assign(new Error("CSV satır sayısı geçersiz (1–500.000)"), { status: 400 });
+  const fileSize = Number(body.fileSize);
+  if (!Number.isSafeInteger(fileSize) || fileSize < 1 || fileSize > 5 * 1024 * 1024) {
+    throw Object.assign(new Error("CSV dosyası en fazla 5 MB olabilir."), { status: 413 });
+  }
+  if (!Number.isSafeInteger(totalRows) || totalRows < 1 || totalRows > 5000) {
+    throw Object.assign(new Error("CSV en fazla 5.000 film içerebilir."), { status: 400 });
+  }
   const now = Math.floor(Date.now() / 1000);
   const id = `ucsv_${userId}_${fileHash.slice(0, 20)}`;
   await env.DB.prepare(`INSERT OR IGNORE INTO csv_import_sessions
-    (id, owner_type, owner_id, list_type, file_hash, file_name, total_rows, next_row, chunk_size, status, created_at, updated_at)
-    VALUES (?, 'user', ?, ?, ?, ?, ?, 0, 100, 'pending', ?, ?)`)
-    .bind(id, userId, listType, fileHash, String(body.fileName || "").slice(0, 255) || null, totalRows, now, now).run();
+    (id, owner_type, owner_id, list_type, file_hash, file_name, file_bytes, total_rows, next_row, chunk_size, status, created_at, updated_at)
+    VALUES (?, 'user', ?, ?, ?, ?, ?, ?, 0, 100, 'pending', ?, ?)`)
+    .bind(id, userId, listType, fileHash, String(body.fileName || "").slice(0, 255) || null, fileSize, totalRows, now, now).run();
   let session = await env.DB.prepare("SELECT * FROM csv_import_sessions WHERE owner_type='user' AND owner_id=? AND list_type=? AND file_hash=?")
     .bind(userId, listType, fileHash).first();
   if (!session) throw new Error("CSV aktarım kaydı oluşturulamadı");
   if (Number(session.total_rows) !== totalRows) throw Object.assign(new Error("Aynı dosya parmak izi farklı satır sayısıyla geldi; dosya değişmiş olabilir."), { status: 409 });
+  if (Number(session.file_bytes || 0) === 0) {
+    await env.DB.prepare("UPDATE csv_import_sessions SET file_bytes = ? WHERE id = ? AND file_bytes = 0").bind(fileSize, session.id).run();
+    session.file_bytes = fileSize;
+  } else if (Number(session.file_bytes) !== fileSize) {
+    throw Object.assign(new Error("Aynı dosya parmak izi farklı boyutla geldi; dosya değişmiş olabilir."), { status: 409 });
+  }
   if (session.status === "cancelled" || session.status === "failed") {
     throw Object.assign(new Error(`Bu aktarım ${session.status === "cancelled" ? "iptal edilmiş" : "hata almış"}. Yeni bir dosya adıyla tekrar seçin.`), { status: 409 });
   }
@@ -303,7 +361,9 @@ async function importCsvSessionChunk(env, userId, body) {
 }
 
 async function importCsvFile(env, userId, listType, csvText) {
-  const items = parseCsv(csvText); if (!items.length) throw new Error("CSV'de geçerli film bulunamadı");
+  const items = parseCsv(csvText);
+  if (!items.length) throw new Error("CSV'de geçerli film bulunamadı");
+  if (items.length > 5000) throw Object.assign(new Error("CSV en fazla 5.000 film içerebilir."), { status: 400 });
   const res = await importCsv(env, userId, listType, items);
   const hash = String(items.length) + "|" + (items[0]?.imdbId || "");
   await env.DB.prepare(`INSERT INTO csv_imports (user_id, list_type, filename, content_hash, row_count, conflicts, imported_at) VALUES (?, ?, NULL, ?, ?, ?, ?)`).bind(userId, listType, hash, items.length, res.conflicts, Math.floor(Date.now() / 1000)).run();
@@ -383,7 +443,7 @@ async function getList(env, userId, listType, page = 1, pageSize = 10, sort = "y
 async function getMovieCounts(env, movieId) { if (!env.DB) return { watched: 0, want: 0, wont: 0 }; const { results } = await env.DB.prepare(`SELECT list_type, COUNT(*) AS c FROM user_movies WHERE movie_id = ? AND list_type IN ('watched','want','wont') GROUP BY list_type`).bind(movieId).all(); const out = { watched: 0, want: 0, wont: 0 }; for (const r of results || []) out[r.list_type] = r.c; return out; }
 
 // === FAZ 8 C-2: refreshCardForImdb — meta parametresi + disambiguation ===
-async function refreshCardForImdb(env, imdbId, signal, meta = {}) {
+export async function refreshCardForImdb(env, imdbId, signal, meta = {}) {
   const cleanId = cleanImdb(imdbId);
   if (!cleanId) throw new Error("imdb_id gerekli");
   const { tmdb } = await import("./sources.js");
@@ -403,6 +463,46 @@ async function refreshCardForImdb(env, imdbId, signal, meta = {}) {
   }
 
   const tmdbMovie = result.picked;
+
+  // If the source CSV supplied directors, verify at least one against TMDB credits.
+  // A mismatch remains unresolved; it is never silently discarded or auto-linked.
+  const sourceDirectors = String(fullMeta.directors || "")
+    .split(/[;,|]/)
+    .map(name => normalizeTitle(name))
+    .filter(Boolean);
+  if (sourceDirectors.length) {
+    const credits = await tmdb(
+      env,
+      `/movie/${tmdbMovie.id}/credits`,
+      { language: "en-US" },
+      signal
+    );
+    const tmdbDirectors = (credits.crew || [])
+      .filter(person => String(person.job || "").toLowerCase() === "director")
+      .map(person => normalizeTitle(person.name || ""))
+      .filter(Boolean);
+    const directorMatch = sourceDirectors.some(sourceName =>
+      tmdbDirectors.some(tmdbName =>
+        sourceName === tmdbName ||
+        (sourceName.length >= 5 && tmdbName.includes(sourceName)) ||
+        (tmdbName.length >= 5 && sourceName.includes(tmdbName))
+      )
+    );
+    if (!directorMatch) {
+      const err = new Error(
+        `IMDb ID (tt${cleanId}) adayı başlık/yıl açısından seçildi ancak yönetmen doğrulaması başarısız. Kayıt otomatik eşleştirilmedi.`
+      );
+      err.code = "ambiguous";
+      err.candidates = [{
+        id: tmdbMovie.id,
+        title: tmdbMovie.original_title || tmdbMovie.title,
+        year: (tmdbMovie.release_date || "").slice(0, 4) || null,
+        directors: tmdbDirectors
+      }];
+      throw err;
+    }
+  }
+
   const detailResult = await handleMovieDetails(env, { movie: { id: tmdbMovie.id, imdb_id: `tt${cleanId}`, title: tmdbMovie.title, original_title: tmdbMovie.original_title, release_date: tmdbMovie.release_date, overview: tmdbMovie.overview, poster_path: tmdbMovie.poster_path, vote_average: tmdbMovie.vote_average, vote_count: tmdbMovie.vote_count, genre_ids: tmdbMovie.genre_ids || [] }, forceAll: true }, signal);
   return { tmdbId: tmdbMovie.id, movie: detailResult.movie, disambiguation: result.reason };
 }
@@ -724,7 +824,7 @@ export async function handleUser(request, env, ctx) {
     if (!session) return jsonErr("Aktarım bulunamadı", 404);
     return jsonRes({ ok: true, session });
   }
-  if (path === "/csv-import" && request.method === "POST") { let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); } const listType = String(body.listType || ""); const csvText = String(body.csvText || ""); if (!["watched", "want", "wont"].includes(listType)) return jsonErr("listType watched/want/wont olmalı", 400); if (!csvText) return jsonErr("csvText boş", 400); try { const r = await importCsvFile(env, sess.user_id, listType, csvText); return jsonRes({ ok: true, ...r }); } catch (e) { return jsonErr(e.message, 400); } }
+  if (path === "/csv-import" && request.method === "POST") { let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); } const listType = String(body.listType || ""); const csvText = String(body.csvText || ""); if (new TextEncoder().encode(csvText).byteLength > 5 * 1024 * 1024) return jsonErr("CSV dosyası en fazla 5 MB olabilir.", 413); if (!["watched", "want", "wont"].includes(listType)) return jsonErr("listType watched/want/wont olmalı", 400); if (!csvText) return jsonErr("csvText boş", 400); try { const r = await importCsvFile(env, sess.user_id, listType, csvText); return jsonRes({ ok: true, ...r }); } catch (e) { return jsonErr(e.message, 400); } }
   if (path.startsWith("/lists/") && request.method === "GET") {
     const lt = path.split("/")[2];
     if (!["watched", "want", "wont"].includes(lt)) return jsonErr("Geçersiz liste", 400);
@@ -1019,8 +1119,8 @@ export async function handleUser(request, env, ctx) {
     // === FAZ 8 C-2: CSV'den metadata çek (disambiguation için) ===
     let meta = {};
     try {
-      const row = await env.DB.prepare("SELECT title_original, title_tr, year FROM user_movies WHERE (imdb_id = ? OR imdb_id = ?) LIMIT 1").bind(imdbId, `tt${imdbId}`).first();
-      if (row) meta = { title_original: row.title_original, title_tr: row.title_tr, year: row.year };
+      const row = await env.DB.prepare("SELECT title_original, title_tr, year, directors FROM user_movies WHERE (imdb_id = ? OR imdb_id = ?) LIMIT 1").bind(imdbId, `tt${imdbId}`).first();
+      if (row) meta = { title_original: row.title_original, title_tr: row.title_tr, year: row.year, directors: row.directors };
     } catch (e) { console.warn("refresh-card meta:", e.message); }
     try {
       const r = await refreshCardForImdb(env, imdbId, request.signal, meta);

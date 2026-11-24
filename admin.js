@@ -1,6 +1,7 @@
 // admin.js — /admin/users listesinde rating_visibility döndürüldü
 // Faz 3: CORS temizlendi (yerel "*" + credentials çelişkisi giderildi; index.js corsHeaders(request) ekler)
 import { getCurrentUserWithAdminBridge } from "./auth.js";
+import { processAdminTaskQueue } from "./admin-task-queue.js";
 
 // === CORS: sadece method + header. Origin ve Credentials index.js son katmanı tarafından eklenir. ===
 const CORS = { "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS", "Access-Control-Allow-Headers": "Content-Type,Authorization" };
@@ -16,8 +17,11 @@ async function requireAdmin(env, request) {
 
   const path = new URL(request.url).pathname.replace(/^\/admin/, "");
   const isBulkRoute = path.startsWith("/bulk/");
+  const isExternalReadRoute =
+    path === "/hf-import/datasets" ||
+    path === "/hf-import/dataset-rows";
 
-  if (!sess.is_admin && !isBulkRoute) {
+  if (!sess.is_admin && !isBulkRoute && !isExternalReadRoute) {
     throw Object.assign(new Error("Admin yetkisi gerekli"), { status: 403 });
   }
   return sess;
@@ -55,7 +59,13 @@ const ALLOWED_PERMS = new Set([
 const BULK_TASK_PERMISSIONS = {
   refresh_cards: "db_cards_bulk_refresh",
   create_cards: "db_cards_bulk_open",
-  delete_cards: "db_cards_bulk_delete"
+  delete_cards: "db_cards_bulk_delete",
+  create_csv_cards: "csv_cards_bulk_open",
+  refresh_csv_cards: "csv_cards_bulk_refresh",
+  remove_csv_cards: "csv_cards_bulk_remove",
+  delete_csv_cards: "csv_cards_bulk_delete",
+  remove_external_import: "external_import_bulk_remove",
+  delete_external_import: "external_import_bulk_delete"
 };
 
 function hashListSnapshot(rows) {
@@ -178,8 +188,11 @@ export async function handleAdmin(request, env, ctx) {
     const sess = await requireAdmin(env, request);
 
     if (path === "/users" && request.method === "GET") {
-      const page = Math.max(1, parseInt(url.searchParams.get("page") || "1"));
-      const pageSize = 25;
+      const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+      const requestedPageSize = parseInt(url.searchParams.get("pageSize") || "10", 10);
+      const pageSize = Number.isFinite(requestedPageSize)
+        ? Math.min(100, Math.max(10, Math.floor(requestedPageSize / 10) * 10))
+        : 10;
       const offset = (page - 1) * pageSize;
       const { results } = await env.DB.prepare(
         `SELECT id, register_number, username, email, is_admin, is_approved, is_public, is_suspended, rating_visibility, created_at, suspended_at
@@ -192,6 +205,53 @@ export async function handleAdmin(request, env, ctx) {
       const users = (results || []).map(u => ({ ...u, permissions: permsByUser.get(u.id) || [] }));
       return jsonRes({ users, total: countRows[0]?.c || 0, page, pageSize });
     }
+    if (path === "/hf-import/datasets" && request.method === "GET") {
+        if (!(await hasExactPermission(env, sess, "external_import_view"))) {
+            return jsonErr("Harici veri kümelerini görüntüleme yetkiniz yok.", 403);
+        }
+        const { results } = await env.DB.prepare(`
+            SELECT source_dataset, COUNT(*) AS row_count,
+                   MAX(updated_at) AS updated_at,
+                   MAX(source_revision) AS source_revision
+            FROM global_movies
+            WHERE source_dataset IS NOT NULL AND source_dataset <> ''
+            GROUP BY source_dataset
+            ORDER BY MAX(updated_at) DESC
+            LIMIT 500
+        `).all();
+        return jsonRes({ datasets: results || [] });
+    }
+
+    if (path === "/hf-import/dataset-rows" && request.method === "GET") {
+        if (!(await hasExactPermission(env, sess, "external_import_view"))) {
+            return jsonErr("Harici veri kayıtlarını görüntüleme yetkiniz yok.", 403);
+        }
+        const dataset = String(url.searchParams.get("dataset") || "").trim();
+        if (!dataset || dataset.length > 255) return jsonErr("Geçerli source_dataset gerekli.", 400);
+        const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
+        const requestedSize = parseInt(url.searchParams.get("pageSize") || "20", 10);
+        const pageSize = Number.isFinite(requestedSize)
+            ? Math.min(100, Math.max(10, Math.floor(requestedSize / 10) * 10))
+            : 20;
+        const offset = (page - 1) * pageSize;
+        const { results } = await env.DB.prepare(`
+            SELECT movie_id, imdb_id, tmdb_id, title_original, year, source_revision, updated_at
+            FROM global_movies
+            WHERE source_dataset = ?
+            ORDER BY updated_at DESC, movie_id
+            LIMIT ? OFFSET ?
+        `).bind(dataset, pageSize, offset).all();
+        const count = await env.DB.prepare(
+            "SELECT COUNT(*) AS total FROM global_movies WHERE source_dataset=?"
+        ).bind(dataset).first();
+        return jsonRes({
+            rows: results || [],
+            total: Number(count?.total || 0),
+            page,
+            pageSize
+        });
+    }
+
     if (path.startsWith("/users/") && request.method === "PUT") {
       const id = parseInt(path.replace("/users/", "").split("/")[0]);
       let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
@@ -274,7 +334,13 @@ if (path === "/bulk/task" && request.method === "POST") {
         "refresh_cards",
         "delete_cards",
         "create_cards",
-        "delete_list"
+        "delete_list",
+        "create_csv_cards",
+        "refresh_csv_cards",
+        "remove_csv_cards",
+        "delete_csv_cards",
+        "remove_external_import",
+        "delete_external_import"
     ];
 
     if (!allowed.includes(taskType)) {
@@ -357,49 +423,256 @@ if (path === "/bulk/task" && request.method === "POST") {
         }
     }
 
-    const taskId =
-              "task_" + Date.now() + "_" +
-        Math.random().toString(36).slice(2, 8);
-
     const timestamp = Math.floor(Date.now() / 1000);
-    let taskTotal = 0;
+    let itemPayloads = [];
+
     if (taskType === "delete_list") {
-        let targetUserId = Number(taskTarget);
-        let selectedIds = null;
-        try {
-            const parsedTarget = JSON.parse(taskTarget || "null");
-            if (parsedTarget && Number.isSafeInteger(Number(parsedTarget.userId))) {
-                targetUserId = Number(parsedTarget.userId);
-                selectedIds = parsedTarget.movieIds || null;
-            }
-        } catch {}
-        const selectedClause = selectedIds ? ` AND movie_id IN (${selectedIds.map(() => "?").join(",")})` : "";
-        const countRow = await env.DB.prepare(
-            `SELECT COUNT(*) AS total FROM user_movies WHERE user_id = ? AND list_type = ?${selectedClause}`
-        ).bind(targetUserId, listType, ...(selectedIds || [])).first();
-        taskTotal = Number(countRow?.total || 0);
+        let parsed = {};
+        try { parsed = JSON.parse(taskTarget || "{}"); } catch {}
+        const targetUserId = Number(parsed.userId || body.userId || target);
+        const selectedIds = Array.isArray(parsed.movieIds) ? [...new Set(parsed.movieIds)] : null;
+        const selectedClause = selectedIds
+            ? ` AND movie_id IN (${selectedIds.map(() => "?").join(",")})`
+            : "";
+        const { results: rows } = await env.DB.prepare(`
+            SELECT movie_id, user_rating
+            FROM user_movies
+            WHERE user_id = ? AND list_type = ?${selectedClause}
+            ORDER BY movie_id
+        `).bind(targetUserId, listType, ...(selectedIds || [])).all();
+
+        if (Number.isSafeInteger(parsed.expectedCount) &&
+            (rows || []).length !== parsed.expectedCount) {
+            return jsonErr("Liste onaydan sonra değişmiş; yeniden önizleme yapın.", 409);
+        }
+        if (parsed.snapshotHash &&
+            hashListSnapshot(rows || []) !== String(parsed.snapshotHash)) {
+            return jsonErr("Liste onaydan sonra değişmiş; yeniden önizleme yapın.", 409);
+        }
+        itemPayloads = (rows || []).map(row => ({
+            key: String(row.movie_id),
+            payload: { userId: targetUserId, listType, movieId: String(row.movie_id) }
+        }));
     } else if (taskType === "delete_cards") {
-        taskTotal = JSON.parse(target || "[]").length;
+        const ids = JSON.parse(target || "[]");
+        if (!Array.isArray(ids) || !ids.length || ids.length > 10000) {
+            return jsonErr("Silinecek film ID listesi 1–10.000 kayıt içermeli.", 400);
+        }
+        itemPayloads = [...new Set(ids.map(String))].map(id => ({
+            key: id,
+            payload: { movieId: id }
+        }));
+    } else if (taskType === "remove_external_import" || taskType === "delete_external_import") {
+        const dataset = String(body.sourceDataset || "").trim();
+        if (!dataset || dataset.length > 255) return jsonErr("Geçerli sourceDataset gerekli.", 400);
+        let rows;
+        if (taskType === "remove_external_import") {
+            const ids = body.movieIds;
+            if (!Array.isArray(ids) || !ids.length || ids.length > 1000) {
+                return jsonErr("Harici listeden kaldırmak için 1–1.000 film ID seçin.", 400);
+            }
+            const uniqueIds = [...new Set(ids.map(String))];
+            const placeholders = uniqueIds.map(() => "?").join(",");
+            const result = await env.DB.prepare(`
+                SELECT movie_id FROM global_movies
+                WHERE source_dataset=? AND movie_id IN (${placeholders})
+            `).bind(dataset, ...uniqueIds).all();
+            rows = result.results || [];
+        } else {
+            const result = await env.DB.prepare(
+                "SELECT movie_id FROM global_movies WHERE source_dataset=? ORDER BY movie_id"
+            ).bind(dataset).all();
+            rows = result.results || [];
+            if (body.expectedCount != null &&
+                (!Number.isSafeInteger(Number(body.expectedCount)) ||
+                 Number(body.expectedCount) !== rows.length)) {
+                return jsonErr("Veri kümesi önizlemeden sonra değişmiş; listeyi yenileyip tekrar onaylayın.", 409);
+            }
+        }
+        if (taskType === "remove_external_import" && rows.length !== new Set(body.movieIds.map(String)).size) {
+            return jsonErr("Seçilen kayıtların bir kısmı veri kümesinde bulunamadı; listeyi yenileyin.", 409);
+        }
+        itemPayloads = rows.map(row => ({
+            key: String(row.movie_id),
+            payload: { movieId: String(row.movie_id), sourceDataset: dataset }
+        }));
+        if (taskType === "delete_external_import") {
+            itemPayloads.push({
+                key: "__finalize__",
+                payload: { finalize: true, sourceDataset: dataset }
+            });
+        }
+        taskTarget = JSON.stringify({ sourceDataset: dataset });
+    } else if (["create_csv_cards", "refresh_csv_cards", "remove_csv_cards", "delete_csv_cards"].includes(taskType)) {
+        const selectedRows = body.rows;
+        if (!Array.isArray(selectedRows) || !selectedRows.length || selectedRows.length > 1000) {
+            return jsonErr("CSV işlemi için 1–1.000 seçili kayıt gerekli.", 400);
+        }
+        const seenRows = new Set();
+        for (const selected of selectedRows) {
+            const userId = Number(selected?.userId);
+            const rowListType = String(selected?.listType || "");
+            const movieId = String(selected?.movieId || "");
+            if (!Number.isSafeInteger(userId) || userId <= 0 ||
+                !["watched", "want", "wont"].includes(rowListType) ||
+                !movieId || movieId.length > 200) {
+                return jsonErr("CSV seçimi geçersiz.", 400);
+            }
+            const key = `${userId}|${rowListType}|${movieId}`;
+            if (seenRows.has(key)) continue;
+            seenRows.add(key);
+
+            const row = await env.DB.prepare(`
+                SELECT user_id, list_type, movie_id, tmdb_id, imdb_id,
+                       title_original, title_tr, year, directors
+                FROM user_movies
+                WHERE source='csv' AND user_id=? AND list_type=? AND movie_id=?
+            `).bind(userId, rowListType, movieId).first();
+            if (!row) continue;
+
+            if (taskType === "remove_csv_cards") {
+                itemPayloads.push({
+                    key,
+                    payload: { userId, listType: rowListType, movieId }
+                });
+            } else if (taskType === "delete_csv_cards" && row.tmdb_id) {
+                const id = String(row.tmdb_id);
+                itemPayloads.push({ key: `tmdb:${id}`, payload: { movieId: id } });
+            } else if (taskType === "refresh_csv_cards" && row.tmdb_id) {
+                const id = String(row.tmdb_id);
+                itemPayloads.push({ key: `tmdb:${id}`, payload: { movieId: id } });
+            } else if (taskType === "create_csv_cards" && !row.tmdb_id && row.imdb_id) {
+                itemPayloads.push({
+                    key,
+                    payload: {
+                        userId,
+                        listType: rowListType,
+                        movieId,
+                        imdbId: String(row.imdb_id).replace(/^tt/i, ""),
+                        title_original: row.title_original,
+                        title_tr: row.title_tr,
+                        year: row.year,
+                        directors: row.directors
+                    }
+                });
+            }
+        }
+    } else if (taskType === "refresh_cards" || taskType === "create_cards") {
+        const rawTargetCount = body.targetCount ?? body.limit ?? 250;
+        const targetCount = String(rawTargetCount).toLowerCase() === "all"
+            ? "all"
+            : Number(rawTargetCount);
+        if (targetCount !== "all" && ![250, 2000].includes(targetCount)) {
+            return jsonErr("targetCount yalnızca 250, 2000 veya 'all' olabilir.", 400);
+        }
+
+        let rows;
+        if (taskType === "refresh_cards" && body.movieIds != null) {
+            if (!Array.isArray(body.movieIds)) {
+                return jsonErr("Seçili kart listesi dizi olmalı.", 400);
+            }
+            const selectedIds = [...new Set(body.movieIds.map(String))];
+            if (!selectedIds.length || selectedIds.length > 1000 ||
+                selectedIds.some(id => !id.trim() || id.length > 200)) {
+                return jsonErr("Seçili kart listesi 1–1.000 geçerli ID içermeli.", 400);
+            }
+            const placeholders = selectedIds.map(() => "?").join(",");
+            const result = await env.DB.prepare(
+                `SELECT movie_id FROM movie_profiles WHERE movie_id IN (${placeholders})`
+            ).bind(...selectedIds).all();
+            rows = result.results || [];
+        } else if (taskType === "refresh_cards") {
+            const query = targetCount === "all"
+                ? "SELECT movie_id FROM movie_profiles ORDER BY updated_at DESC"
+                : "SELECT movie_id FROM movie_profiles ORDER BY updated_at DESC LIMIT ?";
+            const result = targetCount === "all"
+                ? await env.DB.prepare(query).all()
+                : await env.DB.prepare(query).bind(targetCount).all();
+            rows = result.results || [];
+        } else {
+            const query = `
+                SELECT CAST(g.tmdb_id AS TEXT) AS movie_id
+                FROM global_movies g
+                WHERE g.tmdb_id IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM movie_profiles p
+                    WHERE CAST(p.movie_id AS TEXT) = CAST(g.tmdb_id AS TEXT)
+                  )
+                ORDER BY g.updated_at DESC
+                ${targetCount === "all" ? "" : "LIMIT ?"}
+            `;
+            const result = targetCount === "all"
+                ? await env.DB.prepare(query).all()
+                : await env.DB.prepare(query).bind(targetCount).all();
+            rows = result.results || [];
+        }
+        itemPayloads = rows.map(row => ({
+            key: String(row.movie_id),
+            payload: { movieId: String(row.movie_id) }
+        }));
+        taskTarget = JSON.stringify({ targetCount });
     }
+
+    itemPayloads = [...new Map(itemPayloads.map(entry => [entry.key, entry])).values()];
+    const taskTotal = itemPayloads.length;
+    const taskId = "task_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
 
     await env.DB.prepare(`
         INSERT INTO admin_tasks (
             id, admin_user_id, task_type, target, list_type,
             status, total, done, failed, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, 0, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
     `).bind(
         taskId,
         sess.user_id,
         taskType,
         taskTarget,
         listType || null,
+        taskTotal ? "pending" : "completed",
         taskTotal,
         timestamp,
         timestamp
     ).run();
+    if (taskTotal === 0) {
+        await env.DB.prepare("UPDATE admin_tasks SET finished_at=? WHERE id=?").bind(timestamp, taskId).run();
+    }
 
-    return jsonRes({ ok: true, taskId });
+    let insertedItems = 0;
+    try {
+        for (let offset = 0; offset < itemPayloads.length; offset += 50) {
+            const chunk = itemPayloads.slice(offset, offset + 50);
+            await env.DB.batch(chunk.map((entry, index) => env.DB.prepare(`
+                INSERT INTO admin_task_items (
+                    id, task_id, item_key, payload_json, status, attempts,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)
+            `).bind(
+                `${taskId}:${offset + index}`,
+                taskId,
+                entry.key,
+                JSON.stringify(entry.payload),
+                timestamp,
+                timestamp
+            )));
+            insertedItems += chunk.length;
+        }
+    } catch (error) {
+        await env.DB.prepare(`
+            UPDATE admin_tasks
+            SET status='failed', total=?, error_log=?, finished_at=?, updated_at=?
+            WHERE id=?
+        `).bind(
+            insertedItems,
+            String(error?.message || error).slice(0, 1000),
+            timestamp,
+            timestamp,
+            taskId
+        ).run();
+        return jsonErr("Görev kuyruğu hazırlanamadı; kısmi kayıt güvenli biçimde başarısız olarak işaretlendi.", 500);
+    }
+
+    return jsonRes({ ok: true, taskId, total: taskTotal, status: taskTotal ? "pending" : "completed" });
 }
 
 if (path.startsWith("/bulk/task/") && request.method === "GET") {
@@ -419,7 +692,12 @@ if (path.startsWith("/bulk/task/") && request.method === "GET") {
         return jsonErr("Bu görevi görüntüleme yetkiniz yok", 403);
     }
 
-    return jsonRes({ ok: true, task: row });
+    const { results: itemStats } = await env.DB.prepare(`
+        SELECT status, COUNT(*) AS count
+        FROM admin_task_items WHERE task_id = ?
+        GROUP BY status
+    `).bind(taskId).all();
+    return jsonRes({ ok: true, task: row, itemStats: itemStats || [] });
 }
 
 if (path === "/bulk/tasks" && request.method === "GET") {
@@ -472,240 +750,100 @@ if (path === "/bulk/task/cancel" && request.method === "POST") {
         taskId,
         sess.user_id
     ).run();
+    await env.DB.prepare(`
+        UPDATE admin_task_items
+        SET status='cancelled', lease_until=NULL, updated_at=?
+        WHERE task_id=? AND status='pending'
+    `).bind(Math.floor(Date.now() / 1000), taskId).run();
 
     return jsonRes({ ok: true });
 }
 
 if (path === "/bulk/run" && request.method === "POST") {
     let body;
-    try {
-        body = await request.json();
-    } catch {
-        return jsonErr("Geçersiz JSON", 400);
-    }
+    try { body = await request.json(); }
+    catch { return jsonErr("Geçersiz JSON", 400); }
 
     const taskId = String(body.taskId || "").trim();
-
-    if (!taskId) {
-        return jsonErr("taskId gerekli", 400);
-    }
+    if (!taskId) return jsonErr("taskId gerekli", 400);
 
     const task = await env.DB.prepare(`
-        SELECT * FROM admin_tasks
-        WHERE id = ? AND admin_user_id = ?
+        SELECT * FROM admin_tasks WHERE id=? AND admin_user_id=?
     `).bind(taskId, sess.user_id).first();
 
-    if (!task) {
-        return jsonErr("Görev bulunamadı", 404);
-    }
+    if (!task) return jsonErr("Görev bulunamadı", 404);
     if (!(await hasExactPermission(env, sess, permissionForTask(task)))) {
         return jsonErr("Bu görevi çalıştırma yetkiniz yok", 403);
     }
-
-    if (task.status !== "pending") {
-        return jsonErr("Görev zaten başlatılmış", 409);
+    if (!["pending", "running"].includes(task.status)) {
+        return jsonErr("Görev başlatılamaz; durum: " + task.status, 409);
     }
 
-    const started = await env.DB.prepare(`
-        UPDATE admin_tasks
-        SET status = 'running', updated_at = ?
-        WHERE id = ?
-          AND admin_user_id = ?
-          AND status = 'pending'
-    `).bind(
-        Math.floor(Date.now() / 1000),
-        taskId,
-        sess.user_id
-    ).run();
-
-    if (Number(started?.meta?.changes ?? 1) === 0) {
-        return jsonErr("Görev başka bir işlem tarafından başlatılmış", 409);
-    }
-
-    const runTask = async () => {
-        let done = 0;
-        let failed = 0;
-
-        const now = () => Math.floor(Date.now() / 1000);
-
-        const checkCancel = async () => {
-            const row = await env.DB.prepare(`
-                SELECT status FROM admin_tasks WHERE id = ?
-            `).bind(taskId).first();
-
-            return row?.status === "cancelled";
-        };
-
-        const saveProgress = async () => {
-            await env.DB.prepare(`
-                UPDATE admin_tasks
-                SET done = ?, failed = ?, updated_at = ?
-                WHERE id = ?
-            `).bind(done, failed, now(), taskId).run();
-        };
-
-        try {
-            if (!(await hasExactPermission(env, sess, permissionForTask(task)))) {
-                throw new Error("Görev çalışırken gerekli yetki kaldırıldı");
-            }
-            if (
-                task.task_type === "refresh_cards" ||
-                task.task_type === "create_cards"
-            ) {
-                const { results } = await env.DB.prepare(`
-                    SELECT movie_id
-                    FROM movie_profiles
-                    ORDER BY movie_id
-                    LIMIT 200
-                `).all();
-
-                const { handleMovieDetails } =
-                    await import("./research.js");
-
-                for (const row of results || []) {
-                    if (await checkCancel()) break;
-
-                    try {
-                        const movie = {
-                            id: parseInt(row.movie_id, 10) || row.movie_id
-                        };
-
-                        await handleMovieDetails(
-                            env,
-                            { movie, forceAll: true },
-                            null
-                        );
-
-                        done++;
-                    } catch (e) {
-                        failed++;
-                        console.error(
-                            "[bulk refresh card]",
-                            row.movie_id,
-                            e.message
-                        );
-                    }
-
-                    await saveProgress();
-                }
-
-            } else if (task.task_type === "delete_list") {
-                let targetUser = parseInt(task.target, 10);
-                let selectedIds = null;
-                let expectedCount = null;
-                let expectedHash = "";
-                try {
-                    const parsedTarget = JSON.parse(task.target || "null");
-                    if (parsedTarget && Number.isSafeInteger(Number(parsedTarget.userId))) {
-                        targetUser = Number(parsedTarget.userId);
-                        selectedIds = parsedTarget.movieIds || null;
-                        expectedCount = Number.isSafeInteger(parsedTarget.expectedCount) ? parsedTarget.expectedCount : null;
-                        expectedHash = String(parsedTarget.snapshotHash || "");
-                    }
-                } catch {}
-                if (!Number.isSafeInteger(targetUser) || targetUser <= 0) {
-                    throw new Error("Geçersiz target user_id");
-                }
-                const listType = task.list_type || "";
-                if (!["watched", "want", "wont"].includes(listType)) {
-                    throw new Error("Geçersiz list_type");
-                }
-                if (expectedCount !== null || expectedHash) {
-                    const idsClause = selectedIds ? ` AND movie_id IN (${selectedIds.map(() => "?").join(",")})` : "";
-                    const { results: currentRows } = await env.DB.prepare(`
-                        SELECT movie_id, user_rating FROM user_movies
-                        WHERE user_id = ? AND list_type = ?${idsClause}
-                        ORDER BY movie_id
-                    `).bind(targetUser, listType, ...(selectedIds || [])).all();
-                    if ((currentRows || []).length !== expectedCount || hashListSnapshot(currentRows || []) !== expectedHash) {
-                        throw new Error("Liste önizlemeden sonra değişmiş; görev güvenlik için durduruldu. Yeniden önizleme yapın.");
-                    }
-                }
-                const { bulkRemoveListRows } = await import("./users.js");
-                done = await bulkRemoveListRows(env, targetUser, listType, selectedIds);
-                await saveProgress();
-
-            } else if (task.task_type === "delete_cards") {
-                const ids = JSON.parse(task.target || "[]");
-                              if (!Array.isArray(ids)) {
-                    throw new Error("Film ID listesi geçersiz");
-                }
-
-                for (const id of ids) {
-                    if (await checkCancel()) break;
-
-                    try {
-                        await env.DB.batch([
-                            env.DB.prepare("DELETE FROM movie_profile_fields WHERE movie_id = ?").bind(String(id)),
-                            env.DB.prepare("DELETE FROM movie_profiles WHERE movie_id = ?").bind(String(id)),
-                            env.DB.prepare("UPDATE user_movies SET tmdb_id = NULL, updated_at = ? WHERE tmdb_id = ?")
-                                .bind(now(), parseInt(String(id), 10) || String(id))
-                        ]);
-
-                        done++;
-                    } catch (e) {
-                        failed++;
-                        console.error("[bulk delete card]", id, e.message);
-                    }
-
-                    await saveProgress();
-                }
-            }
-
-            const current = await env.DB.prepare(`
-                SELECT status FROM admin_tasks WHERE id = ?
-            `).bind(taskId).first();
-
-            const finalStatus =
-                current?.status === "cancelled"
-                    ? "cancelled"
-                    : "completed";
-
-            await env.DB.prepare(`
-                UPDATE admin_tasks
-                SET status = ?,
-                    done = ?,
-                    failed = ?,
-                    finished_at = ?,
-                    updated_at = ?
-                WHERE id = ?
-            `).bind(
-                finalStatus,
-                done,
-                failed,
-                now(),
-                now(),
-                taskId
-            ).run();
-
-        } catch (e) {
-            console.error("[bulk task failed]", taskId, e);
-
-            await env.DB.prepare(`
-                UPDATE admin_tasks
-                SET status = 'failed',
-                    error_log = ?,
-                    updated_at = ?
-                WHERE id = ?
-            `).bind(
-                String(e.message || e).slice(0, 500),
-                now(),
-                taskId
-            ).run();
-        }
-    };
-
-    if (ctx?.waitUntil) {
-        ctx.waitUntil(runTask());
-    } else {
-        await runTask();
-    }
+    await env.DB.prepare(`
+        UPDATE admin_tasks SET status='running', updated_at=?
+        WHERE id=? AND status IN ('pending','running')
+    `).bind(now(), taskId).run();
 
     return jsonRes({
         ok: true,
         taskId,
-        message: "Görev başlatıldı."
+        message: "Görev kalıcı kuyruğa alındı. Worker zamanlayıcısı öğeleri sürdürecek."
     });
+}
+
+if (path === "/bulk/step" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); }
+    catch { return jsonErr("Geçersiz JSON", 400); }
+    const taskId = String(body.taskId || "").trim();
+    if (!taskId) return jsonErr("taskId gerekli", 400);
+    const task = await env.DB.prepare(
+        "SELECT * FROM admin_tasks WHERE id=? AND admin_user_id=?"
+    ).bind(taskId, sess.user_id).first();
+    if (!task) return jsonErr("Görev bulunamadı", 404);
+    if (!(await hasExactPermission(env, sess, permissionForTask(task)))) {
+        return jsonErr("Bu görevi sürdürme yetkiniz yok", 403);
+    }
+    if (task.status !== "running") {
+        return jsonRes({ ok: true, processed: 0, task });
+    }
+    const result = await processAdminTaskQueue(env, 1, taskId);
+    const updated = await env.DB.prepare(
+        "SELECT * FROM admin_tasks WHERE id=?"
+    ).bind(taskId).first();
+    return jsonRes({ ok: true, ...result, task: updated });
+}
+
+if (path === "/bulk/task/resume" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); }
+    catch { return jsonErr("Geçersiz JSON", 400); }
+    const taskId = String(body.taskId || "").trim();
+    if (!taskId) return jsonErr("taskId gerekli", 400);
+
+    const task = await env.DB.prepare(
+        "SELECT * FROM admin_tasks WHERE id=? AND admin_user_id=?"
+    ).bind(taskId, sess.user_id).first();
+    if (!task) return jsonErr("Görev bulunamadı", 404);
+    if (!(await hasExactPermission(env, sess, permissionForTask(task)))) {
+        return jsonErr("Bu görevi sürdürme yetkiniz yok", 403);
+    }
+    if (!["failed", "running", "pending"].includes(task.status)) {
+        return jsonErr("Bu görev sürdürülemez: " + task.status, 409);
+    }
+
+    await env.DB.prepare(`
+        UPDATE admin_task_items
+        SET status='pending', attempts=0, lease_until=NULL,
+            last_error=NULL, finished_at=NULL, updated_at=?
+        WHERE task_id=? AND status='failed'
+    `).bind(now(), taskId).run();
+    await env.DB.prepare(`
+        UPDATE admin_tasks SET status='running', finished_at=NULL, updated_at=?
+        WHERE id=? AND status IN ('failed','running','pending')
+    `).bind(now(), taskId).run();
+
+    return jsonRes({ ok: true, taskId, status: "running" });
 }
 
 // ============================================================
@@ -717,6 +855,8 @@ if (path === "/hf-import/file/start" && request.method === "POST") {
       let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
       const fileHash = String(body.fileHash || "").toLowerCase();
       const totalRows = Number(body.totalRows);
+      const fileBytes = Number(body.fileSize || 0);
+      if (!Number.isSafeInteger(fileBytes) || fileBytes < 0) return jsonErr("Dosya boyutu geçersiz", 400);
       if (!/^[a-f0-9]{64}$/.test(fileHash)) return jsonErr("Dosya parmak izi geçersiz", 400);
       if (!Number.isSafeInteger(totalRows) || totalRows < 1 || totalRows > 500000) return jsonErr("CSV satır sayısı geçersiz (1–500.000)", 400);
       const dataset = String(body.fileName || "admin-upload.csv").slice(0, 255);
@@ -730,6 +870,12 @@ if (path === "/hf-import/file/start" && request.method === "POST") {
         .bind(sess.user_id, fileHash).first();
       if (!session) return jsonErr("Aktarım kaydı oluşturulamadı", 500);
       if (Number(session.total_rows) !== totalRows) return jsonErr("Aynı dosya parmak izi farklı satır sayısıyla geldi", 409);
+      if (fileBytes && Number(session.file_bytes || 0) === 0) {
+        await env.DB.prepare("UPDATE csv_import_sessions SET file_bytes=? WHERE id=? AND file_bytes=0").bind(fileBytes, session.id).run();
+        session.file_bytes = fileBytes;
+      } else if (fileBytes && Number(session.file_bytes) !== fileBytes) {
+        return jsonErr("Aynı dosya parmak izi farklı boyutla geldi", 409);
+      }
       if (["cancelled", "failed"].includes(session.status)) return jsonErr("Bu aktarım iptal edilmiş veya hata almış", 409);
       if (session.status !== "completed") {
         await env.DB.prepare("UPDATE csv_import_sessions SET status='running', updated_at=? WHERE id=? AND status IN ('pending','stopped','running')")
