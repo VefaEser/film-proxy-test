@@ -319,15 +319,10 @@ function imageDedupeKey(img) {
   try { const u = new URL(img.url); return `${u.hostname.toLowerCase()}${u.pathname.toLowerCase()}`; }
   catch { return String(img.source_id || img.url || "").toLowerCase(); }
 }
-function captionTokens(img) {
-  return new Set(String(`${img.title || ""} ${img.description || ""}`).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").split(/\s+/).filter(w => w.length > 3));
-}
-function captionsTooSimilar(a, b) {
-  const aa = captionTokens(a), bb = captionTokens(b);
-  if (!aa.size || !bb.size) return false;
-  let intersection = 0; for (const token of aa) if (bb.has(token)) intersection++;
-  return intersection / Math.max(1, new Set([...aa, ...bb]).size) > 0.82;
-}
+// Aynı film karesinin açıklamaları çoğu zaman film/oyuncu adlarını tekrar eder.
+// Açıklama benzerliği kare benzerliği değildir; bu nedenle yalnızca gerçek URL
+// tekrarlarını ayıklıyoruz. Aksi halde TMDB ve Crawlora'daki farklı kareler
+// aynı başlığı taşıdığı için yanlışlıkla eleniyordu.
 function selectRepresentativeImages(groups, limit = 20) {
   const priority = [...groups.crawlora, ...groups.tmdb, ...groups.commons, ...(groups.wikidata || [])];
   const seen = new Set(), unique = [];
@@ -347,17 +342,15 @@ function selectRepresentativeImages(groups, limit = 20) {
     : crawlora;
   for (const candidate of spaced) {
     if (ordered.length >= limit) break;
-    if (ordered.some(x => captionsTooSimilar(x, candidate))) continue;
     ordered.push(candidate);
   }
   for (const candidate of [...crawlora.filter(x => !ordered.includes(x)), ...other]) {
     if (ordered.length >= limit) break;
-    if (ordered.some(x => captionsTooSimilar(x, candidate))) continue;
     ordered.push(candidate);
   }
   return ordered.slice(0, limit).map((x, i) => ({ ...x, sample_order: i + 1, source_type: "still_frame" }));
 }
-const VISUAL_SAMPLE_POLICY_VERSION = 2;
+const VISUAL_SAMPLE_POLICY_VERSION = 3;
 const VISUAL_SAMPLE_CACHE_TTL_SECONDS = 6 * 60 * 60;
 
 async function loadVisualSampleSetMeta(env, movieId) {
@@ -477,6 +470,17 @@ export async function handleImages(env, url, signal) {
     catch (e) { console.warn("wikidata images:", e.message); }
     counts.wikidata = groups.wikidata.length; refreshSelection();
   }
+
+  // Kaynak bazında gerçek seçimi raporla; 20 hedefi tamamlanamadıysa eksik
+  // kalan miktar da teşhiste açıkça görülsün.
+  counts.selected = selected.length;
+  counts.selectedBySource = {
+    crawlora: selected.filter(x => x.source === "crawlora").length,
+    tmdb: selected.filter(x => x.source === "tmdb").length,
+    commons: selected.filter(x => x.source === "commons").length,
+    wikidata: selected.filter(x => x.source === "wikidata").length,
+  };
+  counts.remainingTo20 = Math.max(0, 20 - selected.length);
 
   // Yeni kaynaklar hiç sonuç vermediyse önceki geçerli galeri setini silme.
   if (selected.length) await saveVisualSamples(env, id, selected);
