@@ -117,7 +117,9 @@ export async function crawloraStillFrames(env, imdbId, signal, limit = 1000) {
       imdb_id: id, titles: item.titles, credited_names: item.names || []
     });
   }
-  const diagnostic = { requested: rows.length, accepted: normalized.length,
+  const diagnostic = { requested: rows.length, total: Number(root?.total) || rows.length,
+    hasMore: Boolean(root?.has_more), responseTitle: String(root?.title || ""),
+    accepted: normalized.length,
     rejected: Object.values(rejected).reduce((a, b) => a + b, 0), rejectedByReason: rejected, cached: false };
   setDiagnostic(id, diagnostic);
   responseCache.set(id, { at: Date.now(), rows: normalized, diagnostic });
