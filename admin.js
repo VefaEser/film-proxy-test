@@ -450,10 +450,18 @@ if (path === "/bulk/task" && request.method === "POST") {
             hashListSnapshot(rows || []) !== String(parsed.snapshotHash)) {
             return jsonErr("Liste onaydan sonra değişmiş; yeniden önizleme yapın.", 409);
         }
-        itemPayloads = (rows || []).map(row => ({
-            key: String(row.movie_id),
-            payload: { userId: targetUserId, listType, movieId: String(row.movie_id) }
-        }));
+        if (selectedIds === null) {
+            itemPayloads = rows.length ? [{
+                key: "__clear_all__",
+                payload: { userId: targetUserId, listType, clearAll: true, expectedCount: rows.length }
+            }] : [];
+            taskTarget = JSON.stringify({ userId: targetUserId, clearAll: true, expectedCount: rows.length, snapshotHash: parsed.snapshotHash || null });
+        } else {
+            itemPayloads = (rows || []).map(row => ({
+                key: String(row.movie_id),
+                payload: { userId: targetUserId, listType, movieId: String(row.movie_id) }
+            }));
+        }
     } else if (taskType === "delete_cards") {
         const ids = JSON.parse(target || "[]");
         if (!Array.isArray(ids) || !ids.length || ids.length > 10000) {

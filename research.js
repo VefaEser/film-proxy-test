@@ -411,15 +411,18 @@ export async function handleResearchStream(env, body, controller, signal) {
     const needMetatake = needMetatakeForNarrative;
     const externalPerMovie = (needFilmMap ? 1 : 0) + (needMetatake ? 3 : 0);
     const perMovie = 2 + externalPerMovie;
-    const budget = 45;
-    const fixedOverhead = 7;
+    // Cloudflare Free plan subrequest limit is per Worker invocation.
+    // Keep each research request intentionally small; the frontend sends
+    // the remaining candidates in subsequent invocations.
+    const budget = 36;
+    const fixedOverhead = 10;
 
     const maxSafeBatch = Math.max(
       3,
       Math.floor((budget - fixedOverhead) / Math.max(1, perMovie))
     );
 
-    const effectiveBatch = Math.min(10, maxSafeBatch);
+    const effectiveBatch = Math.min(1, maxSafeBatch);
     const movies = Array.isArray(body.movies)
       ? body.movies.slice(0, effectiveBatch)
       : [];

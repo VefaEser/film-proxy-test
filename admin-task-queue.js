@@ -119,11 +119,19 @@ async function processOne(env, onlyTaskId = null) {
           .bind(now(), Number(movieId) || movieId)
       ]);
     } else if (task.task_type === "delete_list" || task.task_type === "remove_csv_cards") {
+      if (payload.clearAll === true) {
+        const { results: currentRows } = await env.DB.prepare(`
+          SELECT movie_id FROM user_movies WHERE user_id=? AND list_type=?
+        `).bind(Number(payload.userId), String(payload.listType)).all();
+        if (Number(payload.expectedCount) !== (currentRows || []).length) {
+          throw new Error("Liste görev kuyruğuna alındıktan sonra değişmiş; güvenlik için sıfırlama durduruldu.");
+        }
+      }
       await bulkRemoveListRows(
         env,
         Number(payload.userId),
         String(payload.listType),
-        [movieId]
+        payload.clearAll === true ? null : [movieId]
       );
     } else if (task.task_type === "create_csv_cards") {
       const { refreshCardForImdb } = await import("./users.js");

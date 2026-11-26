@@ -303,16 +303,19 @@ async function importCsv(env, userId, listType, items, atomicTail = null) {
     // Aynı film başka bir listede ise oradan kaldır; puan ve kişisel alanlar
     // yeni hedef kaydında korunur. Bu iki SQL aynı Turso batch işlemi içindedir.
     const movieId = imdb ? `imdb:${imdb}` : `tmdb:${tmdb}`;
-    const staleMovieIds = [...new Set(priorRows
-      .filter(r => String(r.movie_id) !== movieId)
-      .map(r => String(r.movie_id)))];
+    const conflictingRows = priorRows.filter(r =>
+      String(r.list_type) !== listType || String(r.movie_id) !== movieId
+    );
     const rowStatements = [];
-    if (staleMovieIds.length) {
-      const placeholders = staleMovieIds.map(() => "?").join(",");
+    if (conflictingRows.length) {
+      const uniqueConflicts = [...new Map(conflictingRows.map(r =>
+        [`${r.list_type}|${r.movie_id}`, r]
+      )).values()];
+      const clauses = uniqueConflicts.map(() => "(list_type = ? AND movie_id = ?)").join(" OR ");
+      const conflictArgs = uniqueConflicts.flatMap(r => [String(r.list_type), String(r.movie_id)]);
       rowStatements.push(env.DB.prepare(`DELETE FROM user_movies
         WHERE user_id = ? AND list_type IN ('watched','want','wont')
-          AND movie_id IN (${placeholders})`)
-        .bind(userId, ...staleMovieIds));
+          AND (${clauses})`).bind(userId, ...conflictArgs));
     }
 
     const titleOriginal = String(it.titleOriginal || "").trim() || null;
@@ -357,6 +360,31 @@ async function importCsv(env, userId, listType, items, atomicTail = null) {
       preservedRating ?? csvRating,
       bestPrior?.source || "csv", bestPrior?.source_meta_json || null,
       bestPrior?.created_at || now, now));
+
+    // Aynı CSV parçası içinde sonraki satırlar aynı filmi diğer kimlikle
+    // (IMDb yerine TMDB veya tersi) verirse, yeni hedef kaydı da eşleşme
+    // indekslerinde görünür; böylece tek listede çift kayıt oluşmaz.
+    const currentRecord = {
+      list_type: listType,
+      movie_id: movieId,
+      imdb_id: imdb || bestPrior?.imdb_id || null,
+      tmdb_id: it.tmdbId || bestPrior?.tmdb_id || null,
+      user_rating: preservedRating ?? csvRating,
+      updated_at: now
+    };
+    if (currentRecord.imdb_id) {
+      const key = cleanImdb(currentRecord.imdb_id);
+      if (!byImdb.has(key)) byImdb.set(key, []);
+      byImdb.get(key).push(currentRecord);
+    }
+    if (currentRecord.tmdb_id) {
+      const key = String(currentRecord.tmdb_id);
+      if (!byTmdb.has(key)) byTmdb.set(key, []);
+      byTmdb.get(key).push(currentRecord);
+    }
+    if (!byMovie.has(movieId)) byMovie.set(movieId, []);
+    byMovie.get(movieId).push(currentRecord);
+
     rowGroups.push(rowStatements);
 
     added++;
