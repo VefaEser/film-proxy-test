@@ -21,6 +21,101 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type,Authorization"
 };
 
+// Cloudflare Worker üzerinde galeri küçük resmi üretimi.
+// Cloud Run server.js / Sharp kullanılmaz; dönüşüm cf.image üzerinden yapılır.
+const THUMB_MAX_BYTES = 20 * 1024;
+const THUMB_ALLOWED_HOSTS = new Set([
+  "image.tmdb.org",
+  "upload.wikimedia.org",
+  "crawlora.net",
+  "m.media-amazon.com",
+  "images-na.ssl-images-amazon.com"
+]);
+function isAllowedThumbnailHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  return THUMB_ALLOWED_HOSTS.has(host) || host.endsWith(".wikimedia.org") ||
+    host.endsWith(".crawlora.net") || host.endsWith(".imdb.com") ||
+    host.endsWith(".media-amazon.com");
+}
+function thumbnailError(message, status) {
+  return new Response(JSON.stringify({ ok: false, error: message }), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+  });
+}
+async function handleThumbnailRequest(request) {
+  if (request.method !== "GET") return thumbnailError("GET gerekli.", 405);
+  const requestUrl = new URL(request.url);
+  const source = requestUrl.searchParams.get("src") || "";
+  let sourceUrl;
+  try { sourceUrl = new URL(source); } catch { return thumbnailError("Geçersiz görsel adresi.", 400); }
+  if (sourceUrl.protocol !== "https:" || !isAllowedThumbnailHost(sourceUrl.hostname)) {
+    return thumbnailError("Görsel kaynağı izinli değil.", 403);
+  }
+
+  // Her denemede gerçek dönüştürülmüş gövde ölçülür. Sınır aşılırsa
+  // daha küçük/düşük kaliteli varyant denenir; orijinal asla sunulmaz.
+  const variants = [
+    { width: 480, quality: 42 },
+    { width: 360, quality: 36 },
+    { width: 280, quality: 30 },
+    { width: 220, quality: 25 },
+    { width: 170, quality: 21 },
+    { width: 128, quality: 18 },
+    { width: 96, quality: 15 }
+  ];
+
+  for (const variant of variants) {
+    let currentUrl = new URL(sourceUrl.href);
+    let transformed = null;
+    try {
+      // Yönlendirmeler manuel izlenir; her hedef yeniden host allowlist
+      // kontrolünden geçer. Böylece izinli kaynak üzerinden başka hosta kaçış olmaz.
+      for (let redirectCount = 0; redirectCount <= 3; redirectCount++) {
+        const upstream = await fetch(currentUrl.href, {
+          method: "GET",
+          redirect: "manual",
+          signal: request.signal,
+          headers: { "Accept": "image/webp,image/*;q=0.8", "User-Agent": "FilmKesifMotoru/1.0" },
+          cf: { image: { width: variant.width, fit: "scale-down", quality: variant.quality, format: "webp" } }
+        });
+        if (upstream.status >= 300 && upstream.status < 400) {
+          const location = upstream.headers.get("location");
+          try { await upstream.body?.cancel(); } catch {}
+          if (!location || redirectCount === 3) throw new Error("Görsel kaynağı çok fazla yönlendirme yaptı.");
+          const nextUrl = new URL(location, currentUrl);
+          if (nextUrl.protocol !== "https:" || !isAllowedThumbnailHost(nextUrl.hostname)) {
+            throw new Error("Görsel kaynağı güvenli olmayan bir adrese yönlendirdi.");
+          }
+          currentUrl = nextUrl;
+          continue;
+        }
+        transformed = upstream;
+        break;
+      }
+      if (!transformed || !transformed.ok) continue;
+      const contentType = (transformed.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      if (contentType !== "image/webp") { try { await transformed.body?.cancel(); } catch {} continue; }
+      const bytes = await transformed.arrayBuffer();
+      if (!bytes.byteLength || bytes.byteLength > THUMB_MAX_BYTES) continue;
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": "image/webp",
+          "Content-Length": String(bytes.byteLength),
+          "Cache-Control": "public, max-age=86400",
+          "X-Image-Bytes": String(bytes.byteLength),
+          "X-Image-Max-Bytes": String(THUMB_MAX_BYTES),
+          "X-Image-Verified": "1"
+        }
+      });
+    } catch (error) {
+      console.warn("[image-thumbnail] variant failed", variant.width, variant.quality, error?.message || error);
+    }
+  }
+  return thumbnailError("Görsel 20 KB sınırına indirilemedi; orijinal görsel gösterilmedi.", 422);
+}
+
 async function requireAdminEither(env, request) {
   if (isAdmin(request, env)) return { via: "bearer" };
   const user = await getCurrentUserWithAdminBridge(env, request);
@@ -295,6 +390,7 @@ async function handleRequest(request, env, ctx) {
 
     if (url.pathname.startsWith("/tmdb/")) return response(await tmdbRoute(env, url, request.signal));
     if (url.pathname === "/omdb") { const params = {}; for (const k of ["i","t","y","type"]) if (url.searchParams.has(k)) params[k] = url.searchParams.get(k); return response(await omdb(env, params, request.signal)); }
+    if (url.pathname === "/image/thumbnail") return await handleThumbnailRequest(request);
     if (url.pathname === "/images") return response(await handleImages(env, url, request.signal));
     if (url.pathname === "/visual/analyze" && request.method === "POST") {
       const user = await getCurrentUserWithAdminBridge(env, request);
@@ -352,6 +448,7 @@ try {
     newHeaders.delete("Access-Control-Allow-Origin");
     newHeaders.delete("Access-Control-Allow-Credentials");
     for (const [k, v] of Object.entries(corsHeaders(request))) newHeaders.set(k, v);
+    newHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Type, X-Image-Bytes, X-Image-Max-Bytes, X-Image-Verified");
 
     return new Response(response.body, {
       status: response.status,
@@ -372,4 +469,4 @@ try {
       throw error;
     }
   }
-};
+}; 
