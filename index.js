@@ -50,7 +50,9 @@ async function handleThumbnailRequest(request) {
   let sourceUrl;
   try { sourceUrl = new URL(source); } catch { return thumbnailError("Geçersiz görsel adresi.", 400); }
   if (sourceUrl.protocol !== "https:" || !isAllowedThumbnailHost(sourceUrl.hostname)) {
-    return thumbnailError("Görsel kaynağı izinli değil.", 403);
+    return thumbnailError("Görsel kaynağı izinli değil.", 403, {
+      diagnostic: { sourceHost: sourceUrl.hostname, protocol: sourceUrl.protocol, reason: "host_or_protocol_not_allowed" }
+    });
   }
 
   const variants = [
@@ -59,16 +61,10 @@ async function handleThumbnailRequest(request) {
     { width: 170, quality: 21 }, { width: 128, quality: 18 },
     { width: 96, quality: 15 }
   ];
-  const diagnostics = [];
-
+  const attempts = [];
   for (const variant of variants) {
     let currentUrl = new URL(sourceUrl.href);
     let transformed = null;
-    const attempt = {
-      width: variant.width, quality: variant.quality,
-      upstreamStatus: null, contentType: null, bytes: null,
-      cfResized: null, cfCacheStatus: null, outcome: "started"
-    };
     try {
       for (let redirectCount = 0; redirectCount <= 3; redirectCount++) {
         const upstream = await fetch(currentUrl.href, {
@@ -78,12 +74,11 @@ async function handleThumbnailRequest(request) {
         });
         if (upstream.status >= 300 && upstream.status < 400) {
           const location = upstream.headers.get("location");
-          attempt.redirectStatus = upstream.status;
           try { await upstream.body?.cancel(); } catch {}
-          if (!location || redirectCount === 3) throw new Error("Görsel kaynağı çok fazla yönlendirme yaptı.");
+          if (!location || redirectCount === 3) throw new Error("redirect_limit");
           const nextUrl = new URL(location, currentUrl);
           if (nextUrl.protocol !== "https:" || !isAllowedThumbnailHost(nextUrl.hostname)) {
-            throw new Error("Görsel kaynağı güvenli olmayan bir adrese yönlendirdi.");
+            throw new Error(`redirect_blocked:${nextUrl.hostname}`);
           }
           currentUrl = nextUrl;
           continue;
@@ -91,71 +86,42 @@ async function handleThumbnailRequest(request) {
         transformed = upstream;
         break;
       }
-      if (!transformed) throw new Error("Kaynak yanıtı alınamadı.");
-      attempt.upstreamStatus = transformed.status;
-      attempt.contentType = (transformed.headers.get("content-type") || "").split(";")[0].trim().toLowerCase() || "absent";
-      attempt.cfResized = transformed.headers.get("cf-resized") || "absent";
-      attempt.cfCacheStatus = transformed.headers.get("cf-cache-status") || "absent";
-      if (!transformed.ok) {
-        attempt.outcome = "upstream_http_error";
-        try { await transformed.body?.cancel(); } catch {}
-        diagnostics.push(attempt);
+      if (!transformed) {
+        attempts.push({ width: variant.width, quality: variant.quality, reason: "no_response" });
         continue;
       }
-      if (attempt.contentType !== "image/webp") {
-        attempt.outcome = "not_webp";
+      if (!transformed.ok) {
+        attempts.push({ width: variant.width, quality: variant.quality, reason: "upstream_http", status: transformed.status });
         try { await transformed.body?.cancel(); } catch {}
-        diagnostics.push(attempt);
+        continue;
+      }
+      const contentType = (transformed.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+      if (contentType !== "image/webp") {
+        attempts.push({ width: variant.width, quality: variant.quality, reason: "not_webp", contentType });
+        try { await transformed.body?.cancel(); } catch {}
         continue;
       }
       const bytes = await transformed.arrayBuffer();
-      attempt.bytes = bytes.byteLength;
       if (!bytes.byteLength || bytes.byteLength > THUMB_MAX_BYTES) {
-        attempt.outcome = bytes.byteLength ? "over_20kb" : "empty_body";
-        diagnostics.push(attempt);
+        attempts.push({ width: variant.width, quality: variant.quality, reason: !bytes.byteLength ? "empty_body" : "over_20kb", bytes: bytes.byteLength });
         continue;
       }
-      attempt.outcome = "success";
-      diagnostics.push(attempt);
       return new Response(bytes, {
         status: 200,
         headers: {
           "Content-Type": "image/webp", "Content-Length": String(bytes.byteLength),
-          "Cache-Control": "public, max-age=86400",
-          "X-Image-Bytes": String(bytes.byteLength),
-          "X-Image-Max-Bytes": String(THUMB_MAX_BYTES),
-          "X-Image-Verified": "1",
-          "X-Image-Cf-Resized": attempt.cfResized || "absent",
-          "X-Image-Upstream-Content-Type": attempt.contentType
+          "Cache-Control": "public, max-age=86400", "X-Image-Bytes": String(bytes.byteLength),
+          "X-Image-Max-Bytes": String(THUMB_MAX_BYTES), "X-Image-Verified": "1"
         }
       });
     } catch (error) {
-      attempt.outcome = "exception";
-      attempt.error = String(error?.message || error).slice(0, 240);
-      diagnostics.push(attempt);
-      console.warn("[image-thumbnail] attempt failed", JSON.stringify({ host: sourceUrl.hostname, ...attempt }));
+      const reason = String(error?.message || error).slice(0, 180);
+      attempts.push({ width: variant.width, quality: variant.quality, reason: "exception", detail: reason });
+      console.warn("[image-thumbnail] variant failed", variant.width, variant.quality, reason);
     }
   }
-
-  const summary = {
-    host: sourceUrl.hostname,
-    attempts: diagnostics,
-    likelyCause: diagnostics.some(x => x.contentType && x.contentType !== "image/webp")
-      ? "upstream_not_webp_or_cf_image_transform_not_applied"
-      : diagnostics.some(x => x.outcome === "upstream_http_error")
-        ? "upstream_http_error"
-        : diagnostics.some(x => x.outcome === "over_20kb")
-          ? "transformed_image_over_20kb"
-          : "transform_or_fetch_failed"
-  };
-  console.error("[image-thumbnail] all variants rejected", JSON.stringify(summary));
-  return new Response(JSON.stringify({
-    ok: false,
-    error: "Görsel 20 KB sınırına indirilemedi; orijinal görsel gösterilmedi.",
-    diagnostic: summary
-  }), {
-    status: 422,
-    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+  return thumbnailError("Görsel 20 KB sınırına indirilemedi; orijinal görsel gösterilmedi.", 422, {
+    diagnostic: { sourceHost: sourceUrl.hostname, attempts }
   });
 }
 
@@ -491,7 +457,7 @@ try {
     newHeaders.delete("Access-Control-Allow-Origin");
     newHeaders.delete("Access-Control-Allow-Credentials");
     for (const [k, v] of Object.entries(corsHeaders(request))) newHeaders.set(k, v);
-    newHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Type, X-Image-Bytes, X-Image-Max-Bytes, X-Image-Verified, X-Image-Cf-Resized, X-Image-Upstream-Content-Type");
+    newHeaders.set("Access-Control-Expose-Headers", "Content-Length, Content-Type, X-Image-Bytes, X-Image-Max-Bytes, X-Image-Verified");
 
     return new Response(response.body, {
       status: response.status,
