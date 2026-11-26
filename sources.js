@@ -321,7 +321,7 @@ function captionsTooSimilar(a, b) {
   return intersection / Math.max(1, new Set([...aa, ...bb]).size) > 0.82;
 }
 function selectRepresentativeImages(groups, limit = 20) {
-  const priority = [...groups.crawlora, ...groups.commons, ...groups.tmdb, ...(groups.wikidata || [])];
+  const priority = [...groups.crawlora, ...groups.tmdb, ...groups.commons, ...(groups.wikidata || [])];
   const seen = new Set(), unique = [];
   for (const image of priority) {
     const key = imageDedupeKey(image);
@@ -349,6 +349,34 @@ function selectRepresentativeImages(groups, limit = 20) {
   }
   return ordered.slice(0, limit).map((x, i) => ({ ...x, sample_order: i + 1, source_type: "still_frame" }));
 }
+const VISUAL_SAMPLE_POLICY_VERSION = 2;
+const VISUAL_SAMPLE_CACHE_TTL_SECONDS = 6 * 60 * 60;
+
+async function loadVisualSampleSetMeta(env, movieId) {
+  if (!env.DB || !movieId) return null;
+  try {
+    const row = await env.DB.prepare(`SELECT policy_version, checked_at, counts_json
+      FROM visual_sample_sets WHERE movie_id = ?`).bind(String(movieId)).first();
+    return row || null;
+  } catch (e) {
+    // Kod, migration tamamlanmadan dağıtılırsa galeri çalışmaya devam etsin.
+    console.warn("visual sample policy metadata henüz hazır değil:", e.message);
+    return null;
+  }
+}
+async function saveVisualSampleSetMeta(env, movieId, counts) {
+  if (!env.DB || !movieId) return;
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    await env.DB.prepare(`INSERT INTO visual_sample_sets (movie_id, policy_version, checked_at, counts_json)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(movie_id) DO UPDATE SET policy_version = excluded.policy_version,
+        checked_at = excluded.checked_at, counts_json = excluded.counts_json`)
+      .bind(String(movieId), VISUAL_SAMPLE_POLICY_VERSION, now, JSON.stringify(counts || {})).run();
+  } catch (e) {
+    console.warn("visual sample policy metadata kaydedilemedi:", e.message);
+  }
+}
 async function loadStoredVisualSamples(env, movieId) {
   if (!env.DB || !movieId) return [];
   try {
@@ -357,43 +385,29 @@ async function loadStoredVisualSamples(env, movieId) {
     const rows = results || [];
     if (!rows.length) return [];
 
-    // source_id (örn. "tmdb:/..." veya "commons:123") kimlik bilgisidir;
-    // küçük resim servisine yalnızca gerçek HTTPS görsel URL'si gönderilmelidir.
+    // source_id kimlik bilgisidir; thumbnail servisine yalnızca gerçek HTTPS URL'si gönderilir.
     const validRows = rows.filter((row) => {
-      try {
-        const parsed = new URL(String(row.url || ""));
-        return parsed.protocol === "https:" && Boolean(parsed.hostname);
-      } catch { return false; }
+      try { const parsed = new URL(String(row.url || "")); return parsed.protocol === "https:" && Boolean(parsed.hostname); }
+      catch { return false; }
     });
-
-    // Eski sürümlerde source_url alanına kaynak kimliği yazılmış olabilir.
-    // Karışık/eski bir seti kısmen kullanmak analiz-galeri tutarlılığını bozar;
-    // bozuk seti temizleyip kaynaklardan yeniden toplamak daha güvenlidir.
     if (validRows.length !== rows.length) {
-      console.warn(`[visual-samples] geçersiz source_url bulundu; yeniden toplanacak: ${movieId}`, {
-        total: rows.length, valid: validRows.length
-      });
-      await env.DB.prepare("DELETE FROM visual_samples WHERE movie_id = ? AND source_type = 'still_frame'")
-        .bind(String(movieId)).run();
+      console.warn(`[visual-samples] geçersiz source_url bulundu; yeniden toplanacak: ${movieId}`, { total: rows.length, valid: validRows.length });
+      await env.DB.prepare("DELETE FROM visual_samples WHERE movie_id = ? AND source_type = 'still_frame'").bind(String(movieId)).run();
       return [];
     }
-
-    return validRows.map((r, i) => ({
-      ...r,
-      title: r.source_id || `Sahne ${i + 1}`,
-      thumbnailPath: `/image/thumbnail?src=${encodeURIComponent(r.url)}`,
-      sample_order: i + 1
-    }));
+    return validRows.map((r, i) => ({ ...r, title: r.source_id || `Sahne ${i + 1}`,
+      thumbnailPath: `/image/thumbnail?src=${encodeURIComponent(r.url)}`, sample_order: i + 1 }));
   } catch (e) {
     console.error("visual samples read failed:", e.message);
     throw new Error(`Seçilmiş görsel listesi Turso'dan okunamadı: ${e.message}`);
   }
 }
+
 async function saveVisualSamples(env, movieId, images) {
   if (!env.DB) throw new Error("Test Turso bağlantısı yok; görsel örnekleri kaydedilmedi.");
   if (!movieId || !images.length) return;
   const now = Math.floor(Date.now() / 1000);
-  const statements = [env.DB.prepare("DELETE FROM visual_samples WHERE movie_id = ?").bind(String(movieId))];
+  const statements = [env.DB.prepare("DELETE FROM visual_samples WHERE movie_id = ? AND source_type = 'still_frame'").bind(String(movieId))];
   for (const img of images) {
     statements.push(env.DB.prepare(`INSERT INTO visual_samples
       (movie_id, source_type, source_url, source_id, source_name, license, attribution, match_confidence, image_hash, sample_timestamp, created_at)
@@ -411,19 +425,53 @@ export async function handleImages(env, url, signal) {
   const originalTitle = url.searchParams.get("original_title") || title;
   const imdbId = url.searchParams.get("imdb_id") || url.searchParams.get("imdbId") || "";
   const movie = { id, title, original_title: originalTitle };
-  // Daha önce seçilen kareler varsa aynı seti döndür: analiz/galeri tutarlılığı korunur.
-  const stored = await loadStoredVisualSamples(env, id);
-  if (stored.length) return { images: stored, counts: { stored: stored.length }, imdbId: imdbId || null, analysisStatus: stored[0].analysis_status || "pending" };
-  const [tmdbList, commonsList, crawloraList, wikidataList] = await Promise.all([
-    tmdbBackdrops(env, movie, signal).catch(e => { console.warn("tmdb backdrops:", e.message); return []; }),
-    commonsScenes(env, movie, signal).catch(e => { console.warn("commons scenes:", e.message); return []; }),
-    crawloraStillFrames(env, imdbId, signal).catch(e => { console.warn("crawlora still frames:", e.message); return []; }),
-    wikidataImages(env, imdbId, signal).catch(e => { console.warn("wikidata images:", e.message); return []; })
-  ]);
-  const selected = selectRepresentativeImages({ crawlora: crawloraList, commons: commonsList, tmdb: tmdbList, wikidata: wikidataList }, 20);
-  await saveVisualSamples(env, id, selected);
-  const images = selected.map(img => ({ ...img, thumbnailPath: `/image/thumbnail?src=${encodeURIComponent(img.url)}` }));
-  return { images, counts: { crawlora: crawloraList.length, commons: commonsList.length, tmdb: tmdbList.length, wikidata: wikidataList.length }, imdbId: imdbId || null, analysisStatus: "pending", wikidataDiscovery: wikidataList.length };
+
+  // Aynı politika sürümüyle son 6 saatte toplanmış set varsa tekrar harici kaynak çağırma.
+  const meta = await loadVisualSampleSetMeta(env, id);
+  const now = Math.floor(Date.now() / 1000);
+  const cacheValid = meta && Number(meta.policy_version) === VISUAL_SAMPLE_POLICY_VERSION
+    && now - Number(meta.checked_at || 0) < VISUAL_SAMPLE_CACHE_TTL_SECONDS;
+  if (cacheValid) {
+    const stored = await loadStoredVisualSamples(env, id);
+    let counts = {}; try { counts = JSON.parse(meta.counts_json || "{}"); } catch {}
+    return { images: stored, counts: { ...counts, stored: stored.length }, imdbId: imdbId || null,
+      analysisStatus: stored[0]?.analysis_status || "pending", sourcePolicyVersion: VISUAL_SAMPLE_POLICY_VERSION, cached: true };
+  }
+
+  // Kaynaklar paralel değil, istenen kalite sırasıyla sorgulanır.
+  // 20 uygun kareye ulaşınca sonraki kaynaklara istek gönderilmez.
+  const groups = { crawlora: [], tmdb: [], commons: [], wikidata: [] };
+  const counts = { crawlora: 0, tmdb: 0, commons: 0, wikidata: 0 };
+  let selected = [];
+  const refreshSelection = () => { selected = selectRepresentativeImages(groups, 20); };
+  try { groups.crawlora = await crawloraStillFrames(env, imdbId, signal); }
+  catch (e) { console.warn("crawlora still frames:", e.message); }
+  counts.crawlora = groups.crawlora.length; refreshSelection();
+
+  if (selected.length < 20) {
+    try { groups.tmdb = await tmdbBackdrops(env, movie, signal); }
+    catch (e) { console.warn("tmdb backdrops:", e.message); }
+    counts.tmdb = groups.tmdb.length; refreshSelection();
+  }
+  if (selected.length < 20) {
+    try { groups.commons = await commonsScenes(env, movie, signal); }
+    catch (e) { console.warn("commons scenes:", e.message); }
+    counts.commons = groups.commons.length; refreshSelection();
+  }
+  // Wikidata mevcut dördüncü kaynak olarak korunur; yalnızca ilk üç kaynak 20 kareye ulaşamazsa kullanılır.
+  if (selected.length < 20) {
+    try { groups.wikidata = await wikidataImages(env, imdbId, signal); }
+    catch (e) { console.warn("wikidata images:", e.message); }
+    counts.wikidata = groups.wikidata.length; refreshSelection();
+  }
+
+  // Yeni kaynaklar hiç sonuç vermediyse önceki geçerli galeri setini silme.
+  if (selected.length) await saveVisualSamples(env, id, selected);
+  await saveVisualSampleSetMeta(env, id, counts);
+  let images = selected.map(img => ({ ...img, thumbnailPath: `/image/thumbnail?src=${encodeURIComponent(img.url)}` }));
+  if (!images.length) images = await loadStoredVisualSamples(env, id);
+  return { images, counts, imdbId: imdbId || null,
+    analysisStatus: images[0]?.analysis_status || "pending", sourcePolicyVersion: VISUAL_SAMPLE_POLICY_VERSION, cached: false };
 }
 
 export async function tmdbRoute(env, url, signal) {
