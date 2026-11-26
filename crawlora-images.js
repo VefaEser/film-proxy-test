@@ -6,15 +6,28 @@ const responseCache = new Map();
 const diagnostics = new Map();
 
 function normalizeRows(payload) {
-  const root = payload?.data ?? payload;
+  // Crawlora response envelope: { code, msg, data: { id, images: [...] } }.
+  // Also tolerate a nested data envelope without treating it as an empty success.
+  const root = payload?.data?.data ?? payload?.data ?? payload;
   return { root, rows: Array.isArray(root?.images) ? root.images : Array.isArray(root) ? root : [] };
 }
 function dimensions(item) {
   return { width: Number(item?.width) || 0, height: Number(item?.height) || 0 };
 }
 function belongsToTitle(item, imdbId) {
-  const titles = Array.isArray(item?.titles) ? item.titles : [];
-  return titles.some(title => String(title?.id || title?.imdb_id || title?.imdbId || "").trim().toLowerCase() === imdbId.toLowerCase());
+  // /imdb/title/images is already queried with this exact title ID. Crawlora's
+  // documented title-image response may omit images[].titles entirely (unlike
+  // the name-images endpoint), so absence is NOT a mismatch. If titles are
+  // supplied, however, require at least one explicit match.
+  if (!Array.isArray(item?.titles) || item.titles.length === 0) return true;
+  const wanted = imdbId.toLowerCase();
+  return item.titles.some(title => {
+    const candidates = [title?.id, title?.imdb_id, title?.imdbId, title?.title_id, title?.url];
+    return candidates.some(value => {
+      const text = String(value || '').trim().toLowerCase();
+      return text === wanted || text.includes(`/title/${wanted}/`) || text.endsWith(`/${wanted}`);
+    });
+  });
 }
 function setDiagnostic(id, value) {
   diagnostics.set(id, { ...value, checkedAt: Date.now() });
@@ -44,11 +57,29 @@ export async function crawloraStillFrames(env, imdbId, signal, limit = 1000) {
   url.searchParams.set("type", "still_frame");
   const signals = [signal, AbortSignal.timeout(20000)].filter(Boolean);
   const requestSignal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
-  const res = await fetch(url, { headers: { "x-api-key": key, "Accept": "application/json" }, signal: requestSignal });
-  const body = await res.text();
-  if (!res.ok) { const e = new Error(`Crawlora HTTP ${res.status}: ${body.slice(0, 240)}`); e.status = res.status; throw e; }
-  let payload;
-  try { payload = JSON.parse(body); } catch { throw new Error("Crawlora geçerli JSON döndürmedi."); }
+  let res, body, payload;
+  try {
+    res = await fetch(url, { headers: { "x-api-key": key, "Accept": "application/json" }, signal: requestSignal });
+    body = await res.text();
+  } catch (error) {
+    setDiagnostic(id, { requested: 0, accepted: 0, rejected: 0, reason: "network_error", error: String(error?.message || error).slice(0, 240) });
+    throw error;
+  }
+  if (!res.ok) {
+    const message = `Crawlora HTTP ${res.status}: ${body.slice(0, 240)}`;
+    setDiagnostic(id, { requested: 0, accepted: 0, rejected: 0, reason: "http_error", status: res.status, error: message });
+    const e = new Error(message); e.status = res.status; throw e;
+  }
+  try { payload = JSON.parse(body); }
+  catch {
+    setDiagnostic(id, { requested: 0, accepted: 0, rejected: 0, reason: "invalid_json", error: body.slice(0, 240) });
+    throw new Error("Crawlora geçerli JSON döndürmedi.");
+  }
+  if (payload?.code && Number(payload.code) !== 200) {
+    const message = String(payload.msg || `Crawlora API code ${payload.code}`);
+    setDiagnostic(id, { requested: 0, accepted: 0, rejected: 0, reason: "api_error", status: Number(payload.code), error: message });
+    throw new Error(message);
+  }
 
   const { root, rows } = normalizeRows(payload);
   if (root?.id && String(root.id).trim().toLowerCase() !== id.toLowerCase()) {
@@ -60,7 +91,11 @@ export async function crawloraStillFrames(env, imdbId, signal, limit = 1000) {
   const normalized = [];
   const rejected = { wrong_type: 0, title_mismatch: 0, bad_url: 0, low_resolution: 0, duplicate: 0 };
   for (const item of rows) {
-    if (String(item?.type || "").toLowerCase() !== "still_frame") { rejected.wrong_type++; continue; }
+    // The request already includes type=still_frame. Keep a defensive check
+    // when type is returned, but do not reject a row solely because the API
+    // omitted this redundant field in its normalized response.
+    const imageType = String(item?.type || "").toLowerCase();
+    if (imageType && imageType !== "still_frame") { rejected.wrong_type++; continue; }
     if (!belongsToTitle(item, id)) { rejected.title_mismatch++; continue; }
     const imageUrl = String(item.url || "").trim();
     let parsed;

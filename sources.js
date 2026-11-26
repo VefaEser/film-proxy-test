@@ -274,12 +274,20 @@ async function commonsScenes(env, movie, outerSignal) {
   return pages.map(p => {
     const i = p.imageinfo?.[0] || {}, meta = i.extmetadata || {};
     return { source: "commons", source_id: p.pageid ? `commons:${p.pageid}` : p.title, image_type: "still_frame", title: p.title || "", description: meta.ImageDescription?.value || "", categories: meta.Categories?.value || "", url: i.thumburl || i.url || "", pageUrl: i.descriptionurl || "", license: meta.LicenseShortName?.value || "", attribution: meta.Artist?.value || "", width: Number(i.thumbwidth || i.width) || 0, height: Number(i.thumbheight || i.height) || 0, vote_average: 0 };
-  }).filter(x => x.url && isLikelySceneImage(x));
+  }).filter(x => x.url && isLikelySceneImage(x, title));
 }
-function isLikelySceneImage(img) {
-  const text = `${img.title || ""} ${img.description || ""} ${img.categories || ""}`.toLowerCase();
-  if (/(poster|portrait|headshot|actor|actress|cast|logo|cover|selfie|signature|autograph)/.test(text)) return false;
-  return /(still|scene|screenshot|frame|film|movie)/.test(text);
+function isLikelySceneImage(img, movieTitle = "") {
+  const text = `${img.title || ""} ${img.description || ""} ${img.categories || ""}`
+    .toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  if (/(poster|portrait|headshot|actor|actress|cast|logo|cover|selfie|signature|autograph|award|festival|premiere)/.test(text)) return false;
+  // Commons search is broad and frequently returns files that merely mention
+  // cinema. Require both a scene/still indicator and a meaningful title match.
+  if (!/(still|scene|screenshot|frame|film still|movie still)/.test(text)) return false;
+  const title = String(movieTitle || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  const tokens = title.split(/[^\p{L}\p{N}]+/u).filter(t => t.length >= 3);
+  if (!tokens.length) return false;
+  const matched = tokens.filter(token => text.includes(token)).length;
+  return text.includes(title) || matched / tokens.length >= 0.75;
 }
 async function tmdbBackdrops(env, movie, outerSignal) {
   if (!movie.id) return [];
@@ -445,8 +453,13 @@ export async function handleImages(env, url, signal) {
   let selected = [];
   const refreshSelection = () => { selected = selectRepresentativeImages(groups, 20); };
   try { groups.crawlora = await crawloraStillFrames(env, imdbId, signal); }
-  catch (e) { console.warn("crawlora still frames:", e.message); }
-  counts.crawlora = groups.crawlora.length; counts.crawloraDiagnostics = getCrawloraDiagnostics(imdbId); refreshSelection();
+  catch (e) { console.warn("crawlora still frames:", e.message); counts.crawloraError = String(e?.message || e).slice(0, 240); }
+  counts.crawlora = groups.crawlora.length;
+  counts.crawloraDiagnostics = getCrawloraDiagnostics(imdbId) || {
+    requested: 0, accepted: 0, rejected: 0,
+    reason: !imdbId ? "movie_has_no_imdb_id" : (!env.CRAWLORA_API_KEY ? "api_key_missing" : "no_diagnostic"),
+  };
+  refreshSelection();
 
   if (selected.length < 20) {
     try { groups.tmdb = await tmdbBackdrops(env, movie, signal); }
