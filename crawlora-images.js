@@ -37,7 +37,7 @@ export function getCrawloraDiagnostics(imdbId) {
   return diagnostics.get(String(imdbId || "").trim()) || null;
 }
 
-export async function crawloraStillFrames(env, imdbId, signal, limit = 1000) {
+export async function crawloraStillFrames(env, imdbId, signal, limit = 1000, options = {}) {
   const key = env.CRAWLORA_API_KEY;
   const id = String(imdbId || "").trim();
   if (!key || !/^tt\d{5,12}$/.test(id)) {
@@ -45,7 +45,7 @@ export async function crawloraStillFrames(env, imdbId, signal, limit = 1000) {
     return [];
   }
   const cached = responseCache.get(id);
-  if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+  if (!options.forceRefresh && cached && Date.now() - cached.at < CACHE_TTL_MS) {
     setDiagnostic(id, { ...cached.diagnostic, cached: true });
     return cached.rows;
   }
@@ -62,28 +62,28 @@ export async function crawloraStillFrames(env, imdbId, signal, limit = 1000) {
     res = await fetch(url, { headers: { "x-api-key": key, "Accept": "application/json" }, signal: requestSignal });
     body = await res.text();
   } catch (error) {
-    setDiagnostic(id, { requested: 0, accepted: 0, rejected: 0, reason: "network_error", error: String(error?.message || error).slice(0, 240) });
+    setDiagnostic(id, { apiRequests: 1, requested: 0, accepted: 0, rejected: 0, reason: "network_error", error: String(error?.message || error).slice(0, 240) });
     throw error;
   }
   if (!res.ok) {
     const message = `Crawlora HTTP ${res.status}: ${body.slice(0, 240)}`;
-    setDiagnostic(id, { requested: 0, accepted: 0, rejected: 0, reason: "http_error", status: res.status, error: message });
+    setDiagnostic(id, { apiRequests: 1, requested: 0, accepted: 0, rejected: 0, reason: "http_error", status: res.status, error: message });
     const e = new Error(message); e.status = res.status; throw e;
   }
   try { payload = JSON.parse(body); }
   catch {
-    setDiagnostic(id, { requested: 0, accepted: 0, rejected: 0, reason: "invalid_json", error: body.slice(0, 240) });
+    setDiagnostic(id, { apiRequests: 1, requested: 0, accepted: 0, rejected: 0, reason: "invalid_json", error: body.slice(0, 240) });
     throw new Error("Crawlora geçerli JSON döndürmedi.");
   }
   if (payload?.code && Number(payload.code) !== 200) {
     const message = String(payload.msg || `Crawlora API code ${payload.code}`);
-    setDiagnostic(id, { requested: 0, accepted: 0, rejected: 0, reason: "api_error", status: Number(payload.code), error: message });
+    setDiagnostic(id, { apiRequests: 1, requested: 0, accepted: 0, rejected: 0, reason: "api_error", status: Number(payload.code), error: message });
     throw new Error(message);
   }
 
   const { root, rows } = normalizeRows(payload);
   if (root?.id && String(root.id).trim().toLowerCase() !== id.toLowerCase()) {
-    setDiagnostic(id, { requested: rows.length, accepted: 0, rejected: rows.length, reason: "response_title_id_mismatch" });
+    setDiagnostic(id, { apiRequests: 1, requested: rows.length, accepted: 0, rejected: rows.length, reason: "response_title_id_mismatch" });
     throw new Error(`Crawlora yanıtındaki IMDb ID eşleşmiyor: ${root.id} (beklenen ${id})`);
   }
 
@@ -117,7 +117,7 @@ export async function crawloraStillFrames(env, imdbId, signal, limit = 1000) {
       imdb_id: id, titles: item.titles, credited_names: item.names || []
     });
   }
-  const diagnostic = { requested: rows.length, total: Number(root?.total) || rows.length,
+  const diagnostic = { apiRequests: 1, requested: rows.length, total: Number(root?.total) || rows.length,
     hasMore: Boolean(root?.has_more), responseTitle: String(root?.title || ""),
     accepted: normalized.length,
     rejected: Object.values(rejected).reduce((a, b) => a + b, 0), rejectedByReason: rejected, cached: false };

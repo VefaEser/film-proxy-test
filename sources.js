@@ -370,7 +370,7 @@ function selectRepresentativeImages(groups, limit = 20) {
   }
   return ordered.slice(0, limit).map((x, i) => ({ ...x, sample_order: i + 1, source_type: "still_frame" }));
 }
-const VISUAL_SAMPLE_POLICY_VERSION = 4;
+const VISUAL_SAMPLE_POLICY_VERSION = 5;
 const VISUAL_SAMPLE_CACHE_TTL_SECONDS = 6 * 60 * 60;
 
 async function loadVisualSampleSetMeta(env, movieId) {
@@ -450,12 +450,25 @@ export async function handleImages(env, url, signal) {
   // Aynı politika sürümüyle son 6 saatte toplanmış set varsa tekrar harici kaynak çağırma.
   const meta = await loadVisualSampleSetMeta(env, id);
   const now = Math.floor(Date.now() / 1000);
-  const cacheValid = meta && Number(meta.policy_version) === VISUAL_SAMPLE_POLICY_VERSION
+  const forceRefresh = ["1", "true", "yes"].includes(String(url.searchParams.get("refresh") || "").toLowerCase());
+  const cacheIdentity = {
+    imdbId: String(imdbId || "").trim().toLowerCase(),
+    title: String(originalTitle || title || "").trim().toLowerCase(),
+  };
+  let cachedCounts = {};
+  try { cachedCounts = JSON.parse(meta?.counts_json || "{}"); } catch {}
+  const previousIdentity = cachedCounts.cacheIdentity || null;
+  const identityMatches = previousIdentity
+    && String(previousIdentity.imdbId || "") === cacheIdentity.imdbId
+    && String(previousIdentity.title || "") === cacheIdentity.title;
+  const previousHadErrors = Object.keys(cachedCounts.sourceErrors || {}).length > 0;
+  const cacheValid = !forceRefresh && meta
+    && Number(meta.policy_version) === VISUAL_SAMPLE_POLICY_VERSION
+    && identityMatches && !previousHadErrors
     && now - Number(meta.checked_at || 0) < VISUAL_SAMPLE_CACHE_TTL_SECONDS;
   if (cacheValid) {
     const stored = await loadStoredVisualSamples(env, id);
-    let counts = {}; try { counts = JSON.parse(meta.counts_json || "{}"); } catch {}
-    return { images: stored, counts: { ...counts, stored: stored.length }, imdbId: imdbId || null,
+    return { images: stored, counts: { ...cachedCounts, stored: stored.length }, imdbId: imdbId || null,
       analysisStatus: stored[0]?.analysis_status || "pending", sourcePolicyVersion: VISUAL_SAMPLE_POLICY_VERSION, cached: true };
   }
 
@@ -463,7 +476,7 @@ export async function handleImages(env, url, signal) {
   // 20 görsel sağlaması diğer kaynakların katkısını engellemez.
   const groups = { crawlora: [], tmdb: [], commons: [], wikidata: [] };
   const counts = { crawlora: 0, tmdb: 0, commons: 0, wikidata: 0, sourceErrors: {} };
-  try { groups.crawlora = await crawloraStillFrames(env, imdbId, signal); }
+  try { groups.crawlora = await crawloraStillFrames(env, imdbId, signal, 1000, { forceRefresh }); }
   catch (e) { console.warn("crawlora still frames:", e.message); counts.sourceErrors.crawlora = String(e?.message || e).slice(0, 240); }
   counts.crawlora = groups.crawlora.length;
   counts.crawloraDiagnostics = getCrawloraDiagnostics(imdbId) || {
@@ -500,9 +513,13 @@ export async function handleImages(env, url, signal) {
     wikidata: selected.filter(x => x.source === "wikidata").length,
   };
   counts.remainingTo20 = Math.max(0, 20 - selected.length);
+  counts.cacheIdentity = cacheIdentity;
+  counts.refreshRequested = forceRefresh;
 
   // Yeni kaynaklar hiç sonuç vermediyse önceki geçerli galeri setini silme.
   if (selected.length) await saveVisualSamples(env, id, selected);
+  // Hatalı/eksik taramayı da kaydet; cache kontrolü sourceErrors varsa yeniden dener.
+  // Böylece önceki başarılı metadata, başarısız yenilemeden sonra eski sonucu gizleyemez.
   await saveVisualSampleSetMeta(env, id, counts);
   let images = selected.map(img => ({ ...img, thumbnailPath: `/image/thumbnail?src=${encodeURIComponent(img.url)}` }));
   if (!images.length) images = await loadStoredVisualSamples(env, id);
