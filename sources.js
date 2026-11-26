@@ -324,33 +324,53 @@ function imageDedupeKey(img) {
 // tekrarlarını ayıklıyoruz. Aksi halde TMDB ve Crawlora'daki farklı kareler
 // aynı başlığı taşıdığı için yanlışlıkla eleniyordu.
 function selectRepresentativeImages(groups, limit = 20) {
-  const priority = [...groups.crawlora, ...groups.tmdb, ...groups.commons, ...(groups.wikidata || [])];
-  const seen = new Set(), unique = [];
-  for (const image of priority) {
-    const key = imageDedupeKey(image);
-    if (!key || seen.has(key)) continue;
-    const w = Number(image.width) || 0, h = Number(image.height) || 0;
-    if (w && h && (w < 640 || h < 360)) continue;
-    seen.add(key); unique.push(image);
+  // Kaynakların tamamı sorgulanır. Öncelik korunurken tek bir kaynağın
+  // galeriyi tamamen doldurmasını önlemek için başlangıç dağılımı ağırlıklıdır.
+  const sourceOrder = ["crawlora", "tmdb", "commons", "wikidata"];
+  const sourceCaps = { crawlora: 10, tmdb: 6, commons: 3, wikidata: 1 };
+  const seen = new Set();
+  const uniqueBySource = Object.fromEntries(sourceOrder.map(source => [source, []]));
+
+  for (const source of sourceOrder) {
+    for (const image of groups[source] || []) {
+      const key = imageDedupeKey(image);
+      if (!key || seen.has(key)) continue;
+      const w = Number(image.width) || 0, h = Number(image.height) || 0;
+      if (w && h && (w < 640 || h < 360)) continue;
+      seen.add(key);
+      uniqueBySource[source].push(image);
+    }
   }
-  // Crawlora pozisyonlarından eşit aralıklı örnekleme; azsa diğer doğrulanmış sahne kaynaklarıyla tamamla.
-  const crawlora = unique.filter(x => x.source === "crawlora");
-  const other = unique.filter(x => x.source !== "crawlora");
+
+  const pickSpaced = (items, count) => {
+    if (items.length <= count) return items.slice();
+    if (count <= 1) return [items[0]];
+    return Array.from({ length: count }, (_, i) => items[Math.round(i * (items.length - 1) / (count - 1))]);
+  };
+
   const ordered = [];
-  const spaced = crawlora.length > limit
-    ? Array.from({ length: limit }, (_, i) => crawlora[Math.round(i * (crawlora.length - 1) / (limit - 1))])
-    : crawlora;
-  for (const candidate of spaced) {
-    if (ordered.length >= limit) break;
-    ordered.push(candidate);
+  const chosen = new Set();
+  // Ensimmäinen vaihe: Crawlora öncelikli, ancak diğer kaynaklara da yer ayır.
+  for (const source of sourceOrder) {
+    const candidates = pickSpaced(uniqueBySource[source], Math.min(sourceCaps[source], limit));
+    for (const image of candidates) {
+      if (ordered.length >= limit) break;
+      ordered.push(image);
+      chosen.add(image);
+    }
   }
-  for (const candidate of [...crawlora.filter(x => !ordered.includes(x)), ...other]) {
-    if (ordered.length >= limit) break;
-    ordered.push(candidate);
+  // İkinci aşama: kaynaklar kota dolduramadıysa kalan görselleri öncelik sırasıyla ekle.
+  for (const source of sourceOrder) {
+    for (const image of uniqueBySource[source]) {
+      if (ordered.length >= limit) break;
+      if (chosen.has(image)) continue;
+      ordered.push(image);
+      chosen.add(image);
+    }
   }
   return ordered.slice(0, limit).map((x, i) => ({ ...x, sample_order: i + 1, source_type: "still_frame" }));
 }
-const VISUAL_SAMPLE_POLICY_VERSION = 3;
+const VISUAL_SAMPLE_POLICY_VERSION = 4;
 const VISUAL_SAMPLE_CACHE_TTL_SECONDS = 6 * 60 * 60;
 
 async function loadVisualSampleSetMeta(env, movieId) {
@@ -439,38 +459,37 @@ export async function handleImages(env, url, signal) {
       analysisStatus: stored[0]?.analysis_status || "pending", sourcePolicyVersion: VISUAL_SAMPLE_POLICY_VERSION, cached: true };
   }
 
-  // Kaynaklar paralel değil, istenen kalite sırasıyla sorgulanır.
-  // 20 uygun kareye ulaşınca sonraki kaynaklara istek gönderilmez.
+  // Dört kaynak da her yenilemede sorgulanır. Böylece bir kaynağın tek başına
+  // 20 görsel sağlaması diğer kaynakların katkısını engellemez.
   const groups = { crawlora: [], tmdb: [], commons: [], wikidata: [] };
-  const counts = { crawlora: 0, tmdb: 0, commons: 0, wikidata: 0 };
-  let selected = [];
-  const refreshSelection = () => { selected = selectRepresentativeImages(groups, 20); };
+  const counts = { crawlora: 0, tmdb: 0, commons: 0, wikidata: 0, sourceErrors: {} };
   try { groups.crawlora = await crawloraStillFrames(env, imdbId, signal); }
-  catch (e) { console.warn("crawlora still frames:", e.message); counts.crawloraError = String(e?.message || e).slice(0, 240); }
+  catch (e) { console.warn("crawlora still frames:", e.message); counts.sourceErrors.crawlora = String(e?.message || e).slice(0, 240); }
   counts.crawlora = groups.crawlora.length;
   counts.crawloraDiagnostics = getCrawloraDiagnostics(imdbId) || {
     requested: 0, accepted: 0, rejected: 0,
     reason: !imdbId ? "movie_has_no_imdb_id" : (!env.CRAWLORA_API_KEY ? "api_key_missing" : "no_diagnostic"),
   };
-  refreshSelection();
 
-  if (selected.length < 20) {
-    try { groups.tmdb = await tmdbBackdrops(env, movie, signal); }
-    catch (e) { console.warn("tmdb backdrops:", e.message); }
-    counts.tmdb = groups.tmdb.length; refreshSelection();
-  }
-  if (selected.length < 20) {
-    try { groups.commons = await commonsScenes(env, movie, signal); }
-    catch (e) { console.warn("commons scenes:", e.message); }
-    counts.commons = groups.commons.length; refreshSelection();
-  }
-  // Wikidata mevcut dördüncü kaynak olarak korunur; yalnızca ilk üç kaynak 20 kareye ulaşamazsa kullanılır.
-  if (selected.length < 20) {
-    try { groups.wikidata = await wikidataImages(env, imdbId, signal); }
-    catch (e) { console.warn("wikidata images:", e.message); }
-    counts.wikidata = groups.wikidata.length; refreshSelection();
-  }
+  try { groups.tmdb = await tmdbBackdrops(env, movie, signal); }
+  catch (e) { console.warn("tmdb backdrops:", e.message); counts.sourceErrors.tmdb = String(e?.message || e).slice(0, 240); }
+  counts.tmdb = groups.tmdb.length;
 
+  try { groups.commons = await commonsScenes(env, movie, signal); }
+  catch (e) { console.warn("commons scenes:", e.message); counts.sourceErrors.commons = String(e?.message || e).slice(0, 240); }
+  counts.commons = groups.commons.length;
+
+  try { groups.wikidata = await wikidataImages(env, imdbId, signal); }
+  catch (e) { console.warn("wikidata images:", e.message); counts.sourceErrors.wikidata = String(e?.message || e).slice(0, 240); }
+  counts.wikidata = groups.wikidata.length;
+
+  const selected = selectRepresentativeImages(groups, 20);
+  counts.fetchedBySource = {
+    crawlora: groups.crawlora.length,
+    tmdb: groups.tmdb.length,
+    commons: groups.commons.length,
+    wikidata: groups.wikidata.length,
+  };
   // Kaynak bazında gerçek seçimi raporla; 20 hedefi tamamlanamadıysa eksik
   // kalan miktar da teşhiste açıkça görülsün.
   counts.selected = selected.length;
