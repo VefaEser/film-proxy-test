@@ -354,8 +354,40 @@ async function loadStoredVisualSamples(env, movieId) {
   try {
     const { results } = await env.DB.prepare(`SELECT vs.id, vs.source_url AS url, vs.source_id, vs.source_name AS source, vs.license, vs.attribution, vs.sample_timestamp, vs.source_type, vp.analysis_status
       FROM visual_samples vs LEFT JOIN visual_profiles vp ON vp.movie_id = vs.movie_id WHERE vs.movie_id = ? AND vs.source_type = 'still_frame' ORDER BY vs.id ASC LIMIT 20`).bind(String(movieId)).all();
-    return (results || []).map((r, i) => ({ ...r, title: r.source_id || `Sahne ${i + 1}`, thumbnailPath: `/image/thumbnail?src=${encodeURIComponent(r.url)}`, sample_order: i + 1 }));
-  } catch (e) { console.error("visual samples read failed:", e.message); throw new Error(`Seçilmiş görsel listesi Turso'dan okunamadı: ${e.message}`); }
+    const rows = results || [];
+    if (!rows.length) return [];
+
+    // source_id (örn. "tmdb:/..." veya "commons:123") kimlik bilgisidir;
+    // küçük resim servisine yalnızca gerçek HTTPS görsel URL'si gönderilmelidir.
+    const validRows = rows.filter((row) => {
+      try {
+        const parsed = new URL(String(row.url || ""));
+        return parsed.protocol === "https:" && Boolean(parsed.hostname);
+      } catch { return false; }
+    });
+
+    // Eski sürümlerde source_url alanına kaynak kimliği yazılmış olabilir.
+    // Karışık/eski bir seti kısmen kullanmak analiz-galeri tutarlılığını bozar;
+    // bozuk seti temizleyip kaynaklardan yeniden toplamak daha güvenlidir.
+    if (validRows.length !== rows.length) {
+      console.warn(`[visual-samples] geçersiz source_url bulundu; yeniden toplanacak: ${movieId}`, {
+        total: rows.length, valid: validRows.length
+      });
+      await env.DB.prepare("DELETE FROM visual_samples WHERE movie_id = ? AND source_type = 'still_frame'")
+        .bind(String(movieId)).run();
+      return [];
+    }
+
+    return validRows.map((r, i) => ({
+      ...r,
+      title: r.source_id || `Sahne ${i + 1}`,
+      thumbnailPath: `/image/thumbnail?src=${encodeURIComponent(r.url)}`,
+      sample_order: i + 1
+    }));
+  } catch (e) {
+    console.error("visual samples read failed:", e.message);
+    throw new Error(`Seçilmiş görsel listesi Turso'dan okunamadı: ${e.message}`);
+  }
 }
 async function saveVisualSamples(env, movieId, images) {
   if (!env.DB) throw new Error("Test Turso bağlantısı yok; görsel örnekleri kaydedilmedi.");
