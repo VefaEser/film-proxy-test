@@ -1,7 +1,7 @@
 // sources.js — omdbBest: prefixsiz ID'ye sadece "tt" ekle, sıfırları temizleme (Se7en tt0114369 kritik düzeltme)
 // Faz 3: omdb() in-memory cache (5dk TTL, max 100 entry) — OMDb kotasını 2x korur
 import { safeJSON, movieKey, yearOf, norm, getFilmmapCache, putFilmmapCache, getMetatakeExtendedCache, putMetatakeExtendedCache } from "./db.js";
-import { crawloraStillFrames } from "./crawlora-images.js";
+import { crawloraStillFrames, getCrawloraDiagnostics } from "./crawlora-images.js";
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const USER_AGENT = "FilmKesifMotoru/1.0 (https://github.com/VefaEser/film-proxy; contact:vefaeser@ornitonerenk.com)";
@@ -446,7 +446,7 @@ export async function handleImages(env, url, signal) {
   const refreshSelection = () => { selected = selectRepresentativeImages(groups, 20); };
   try { groups.crawlora = await crawloraStillFrames(env, imdbId, signal); }
   catch (e) { console.warn("crawlora still frames:", e.message); }
-  counts.crawlora = groups.crawlora.length; refreshSelection();
+  counts.crawlora = groups.crawlora.length; counts.crawloraDiagnostics = getCrawloraDiagnostics(imdbId); refreshSelection();
 
   if (selected.length < 20) {
     try { groups.tmdb = await tmdbBackdrops(env, movie, signal); }
