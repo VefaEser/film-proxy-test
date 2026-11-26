@@ -15,16 +15,43 @@ function isAllowedImageHost(host) {
   return h === "image.tmdb.org" || h === "upload.wikimedia.org" || h.endsWith(".wikimedia.org") ||
     h === "m.media-amazon.com" || h.endsWith(".media-amazon.com") || h === "images-na.ssl-images-amazon.com" || h === "crawlora.net" || h.endsWith(".crawlora.net") || h.endsWith(".imdb.com");
 }
+function thumbnailCorsHeaders(req) {
+  const origin = String(req.headers.origin || "");
+  const configured = String(process.env.THUMBNAIL_ALLOWED_ORIGINS || "")
+    .split(",").map(value => value.trim()).filter(Boolean);
+  const allowed = new Set([
+    "https://vefaeser-kestiktest.static.hf.space",
+    ...configured
+  ]);
+  if (!origin) return {};
+  if (!allowed.has(origin)) return null;
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Expose-Headers": "Content-Length, Content-Type, X-Image-Bytes, X-Image-Max-Bytes, X-Image-Verified",
+    "Vary": "Origin"
+  };
+}
+
 async function serveThumbnail(req, res, url) {
-  if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "GET gerekli." });
+  const cors = thumbnailCorsHeaders(req);
+  if (cors === null) return sendJson(res, 403, { ok: false, error: "Bu kaynaktan küçük görsel isteğine izin verilmiyor." });
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, { ...cors, "Access-Control-Max-Age": "600", "Content-Length": "0" });
+    return res.end();
+  }
+  if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "GET gerekli." }, cors);
+  const sendThumbnailError = (status, payload) => sendJson(res, status, payload, cors);
   const source = url.searchParams.get("src") || "";
   let parsed;
-  try { parsed = new URL(source); } catch { return sendJson(res, 400, { ok: false, error: "Geçersiz görsel adresi." }); }
-  if (parsed.protocol !== "https:" || !isAllowedImageHost(parsed.hostname)) return sendJson(res, 403, { ok: false, error: "Görsel kaynağı izinli değil." });
+  try { parsed = new URL(source); } catch { return sendThumbnailError(400, { ok: false, error: "Geçersiz görsel adresi." }); }
+  if (parsed.protocol !== "https:" || !isAllowedImageHost(parsed.hostname)) return sendThumbnailError(403, { ok: false, error: "Görsel kaynağı izinli değil." });
   const cacheKey = createHash("sha256").update(source).digest("hex");
   const cached = thumbnailCache.get(cacheKey);
   if (cached) {
-    res.writeHead(200, { "Content-Type": "image/webp", "Content-Length": cached.length, "Cache-Control": "public, max-age=86400", "X-Image-Bytes": String(cached.length) });
+    res.writeHead(200, { "Content-Type": "image/webp", "Content-Length": cached.length, "Cache-Control": "no-store", "X-Image-Bytes": String(cached.length), "X-Image-Max-Bytes": String(THUMB_MAX_BYTES), "X-Image-Verified": "1", ...cors });
     return res.end(cached);
   }
   let upstream = await fetch(parsed, { redirect: "manual", signal: AbortSignal.timeout(12000), headers: { "User-Agent": "FilmKesifMotoru/1.0" } });
@@ -32,14 +59,14 @@ async function serveThumbnail(req, res, url) {
     const location = upstream.headers.get("location");
     let redirected;
     try { redirected = new URL(location, parsed); } catch {}
-    if (!redirected || redirected.protocol !== "https:" || !isAllowedImageHost(redirected.hostname)) return sendJson(res, 502, { ok: false, error: "Görsel kaynağı güvenli olmayan yönlendirme yaptı." });
+    if (!redirected || redirected.protocol !== "https:" || !isAllowedImageHost(redirected.hostname)) return sendThumbnailError(502, { ok: false, error: "Görsel kaynağı güvenli olmayan yönlendirme yaptı." });
     upstream = await fetch(redirected, { redirect: "manual", signal: AbortSignal.timeout(12000), headers: { "User-Agent": "FilmKesifMotoru/1.0" } });
   }
-  if (!upstream.ok) return sendJson(res, 502, { ok: false, error: `Görsel kaynağı HTTP ${upstream.status}.` });
+  if (!upstream.ok) return sendThumbnailError(502, { ok: false, error: `Görsel kaynağı HTTP ${upstream.status}.` });
   const type = (upstream.headers.get("content-type") || "").toLowerCase();
-  if (!type.startsWith("image/")) return sendJson(res, 415, { ok: false, error: "Kaynak bir görsel döndürmedi." });
+  if (!type.startsWith("image/")) return sendThumbnailError(415, { ok: false, error: "Kaynak bir görsel döndürmedi." });
   const raw = Buffer.from(await upstream.arrayBuffer());
-  if (!raw.length || raw.length > 12 * 1024 * 1024) return sendJson(res, 413, { ok: false, error: "Kaynak görsel boyutu sınırı aşıyor." });
+  if (!raw.length || raw.length > 12 * 1024 * 1024) return sendThumbnailError(413, { ok: false, error: "Kaynak görsel boyutu sınırı aşıyor." });
   let output = null;
   for (const width of [480, 400, 320, 260, 220, 180]) {
     for (const quality of [66, 56, 46, 36, 28]) {
@@ -48,10 +75,11 @@ async function serveThumbnail(req, res, url) {
     }
     if (output) break;
   }
-  if (!output) return sendJson(res, 422, { ok: false, error: "Görsel 20 KB sınırına indirilemedi." });
+  if (!output) return sendThumbnailError(422, { ok: false, error: "Görsel 20 KB sınırına indirilemedi; orijinal görsel sunulmadı." });
+  if (output.length > THUMB_MAX_BYTES) return sendThumbnailError(422, { ok: false, error: `Küçük görsel ${output.length} bayt; 20 KB sınırını aşıyor.` });
   if (thumbnailCache.size >= 1000) thumbnailCache.delete(thumbnailCache.keys().next().value);
   thumbnailCache.set(cacheKey, output);
-  res.writeHead(200, { "Content-Type": "image/webp", "Content-Length": output.length, "Cache-Control": "public, max-age=86400", "X-Image-Bytes": String(output.length) });
+  res.writeHead(200, { "Content-Type": "image/webp", "Content-Length": output.length, "Cache-Control": "no-store", "X-Image-Bytes": String(output.length), "X-Image-Max-Bytes": String(THUMB_MAX_BYTES), "X-Image-Verified": "1", ...cors });
   res.end(output);
 }
 
@@ -84,12 +112,13 @@ async function readBody(req) {
   return size ? Buffer.concat(chunks) : undefined;
 }
 
-function sendJson(res, status, payload) {
+function sendJson(res, status, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
-    "Cache-Control": "no-store"
+    "Cache-Control": "no-store",
+    ...extraHeaders
   });
   res.end(body);
 }

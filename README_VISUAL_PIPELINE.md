@@ -8,7 +8,8 @@ Bu paket yalnızca `backend_test/` ve `frontend_test/` içindir. `backend_live/`
 - Seçim: en fazla 20 sahne. Aynı URL ve benzer açıklamalar elenir; Crawlora kareleri film boyunca mümkün olduğunca dengeli örneklenir.
 - Tek kaynak listesi: seçilen URL'ler `visual_samples` tablosuna `still_frame` olarak yazılır. `/images` galerisi ve `/visual/analyze` aynı kayıtları kullanır. Kayıt yazma/okuma hataları artık sessizce geçilmez.
 - Turso'ya görsel binary yazılmaz. Kaynak URL/ID, kaynak adı, lisans/atıf, örneklem bilgisi ve analiz sonuçları saklanır.
-- Kullanıcı galerisi: Cloud Run sunucusu Sharp ile WebP üretir. Her çıktı 20.480 baytı aşmıyorsa döndürülür; sınır sağlanamazsa orijinal gösterilmez.
+- Kullanıcı galerisi: Cloud Run sunucusu Sharp ile WebP üretir. Her çıktı kesin olarak en fazla 20.480 bayttır; sınır sağlanamazsa orijinal gösterilmez. Sunucu `X-Image-Verified: 1`, `X-Image-Bytes` ve `X-Image-Max-Bytes` başlıklarını döndürür.
+- Tarayıcı tarafı da görseli doğrudan `<img>` kaynağına bağlamaz: önce `fetch` ile indirir, `image/webp` MIME türünü, doğrulama başlığını ve gerçek `Blob.size` değerini denetler. 20.480 baytı aşan, doğrulanmamış veya WebP olmayan yanıtlar reddedilir; hiçbir durumda orijinal URL'ye geri dönüş yapılmaz. Yalnızca doğrulanmış küçük resim `blob:` URL'si olarak galeride gösterilir.
 - Poster, portre, logo ve tanıtım afişleri sahne analizi örneklemi değildir.
 
 ## Görsel analiz kapsamı
@@ -61,7 +62,8 @@ Mevcut metin GPT-OSS modelleri görsel yedek olarak kullanılmaz. Groq'un belgel
 ## Beklenen kontroller
 
 - `/images` en fazla 20 kare döndürür; `visual_samples` yazma hatası olursa istek hata verir, kaydedilmemiş bir galeri başarılı gibi gösterilmez.
-- Her `/image/thumbnail` yanıtı `image/webp` ve `Content-Length <= 20480` olmalı.
+- Her `/image/thumbnail` yanıtı `image/webp`, `Content-Length <= 20480`, `X-Image-Verified: 1` ve `X-Image-Bytes <= 20480` olmalı.
+- Tarayıcı Network yanıtında da her galeri görselinin gerçek transfer boyutu 20.480 baytı geçmemeli; 20 KB üstü yanıt veya doğrulama başlığı eksikse görsel görünmemeli.
 - `/visual/analyze` yanıtında `provider`, `model`, `method`, `analyzedSamples`, `validSamples` ve `coverage` bulunmalı.
 - `visual_profile_fields` içinde `cinematography`, `day_ratio`, `night_ratio`, `indoor_ratio`, `outdoor_ratio`, `color_ratio`, `color_style`, `technical_style` ve `visual_analysis_meta` alanları oluşmalı.
 - Arama filtresi yeterli örneklemde görsel değerleri kullanmalı; metin profili değerleri veritabanında değiştirilmemeli.
