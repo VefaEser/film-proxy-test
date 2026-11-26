@@ -1,7 +1,8 @@
 {
   "type": "module",
   "dependencies": {
-    "@libsql/client": "^0.18.0"
+    "@libsql/client": "^0.18.0",
+    "sharp": "^0.34.5"
   },
   "scripts": {
     "start": "node server.js"

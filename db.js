@@ -679,6 +679,34 @@ export async function getVisualProfile(env, movieId) {
   }
 }
 
+export async function getVisualProfilesBatch(env, movieIds) {
+  if (!env.DB || !Array.isArray(movieIds) || !movieIds.length) return new Map();
+  try {
+    const placeholders = movieIds.map(() => "?").join(",");
+    const { results } = await env.DB.prepare(
+      `SELECT f.movie_id, f.field_name, f.value_json, f.confidence, f.sample_count,
+              f.source_type, f.model_name, f.model_version, f.analyzed_at,
+              p.analysis_status, p.schema_version
+       FROM visual_profile_fields f
+       JOIN visual_profiles p ON p.movie_id = f.movie_id
+       WHERE f.movie_id IN (${placeholders})`
+    ).bind(...movieIds).all();
+    const map = new Map();
+    for (const row of results || []) {
+      if (!map.has(row.movie_id)) map.set(row.movie_id, { analysisStatus: row.analysis_status, schemaVersion: row.schema_version, fields: {} });
+      map.get(row.movie_id).fields[row.field_name] = {
+        value: safeJSON(row.value_json, null), confidence: Number(row.confidence),
+        sampleCount: Number(row.sample_count) || 0, sourceType: row.source_type,
+        modelName: row.model_name, modelVersion: row.model_version, analyzedAt: row.analyzed_at
+      };
+    }
+    return map;
+  } catch (error) {
+    console.warn("visual profile batch read:", error.message);
+    return new Map();
+  }
+}
+
 export async function putVisualProfile(env, movieId, fields, opts = {}) {
   const db = requireDB(env, "visual profile write");
 

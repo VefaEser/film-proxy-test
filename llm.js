@@ -230,11 +230,9 @@ async function callGeminiGenerate(env, key, model, prompt, outerSignal) {
   return { text, ...usage };
 }
 async function callGeminiStreamGenerate(env, key, model, prompt, outerSignal) {
-  // Gerçek yanıt testi geçmiş model/yöntem çifti: gemini-3.6-flash.
-  // Diğer modeller için destek doğrulanmadan streaming denenmez.
-  if (normalizeModelName(model) !== "gemini-3.6-flash") {
-    throw new Error(`StreamGenerateContent ${model} için doğrulanmış destek kaydı yok.`);
-  }
+  // StreamGenerateContent tüm Gemini model zincirinde genel yedek yöntemdir.
+  // Bir model/yöntem çifti sağlayıcı tarafından desteklenmiyorsa HTTP hatası
+  // üst seviyedeki model/yöntem fallback döngüsüne bırakılır.
   const url = `${GOOGLE_GENERATE}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
   const signals = [outerSignal, AbortSignal.timeout(25000)].filter(Boolean);
   const signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);

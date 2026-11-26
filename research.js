@@ -1,7 +1,7 @@
 // research.js — Faz D fix: afterLocal skipTaxonomy + zengin AI payload
 import { FIELD_DEFS, FIELD_RULES, SEMANTIC_FIELDS, LLM_FIELDS, CHARACTER_TRAITS_LIST, STORY_DIMENSIONS_LIST, TAXONOMY_LLM_FIELDS } from "./fields.config.js";
 import { isValidSlugForCategory } from "./taxonomy.config.js";
-import { getProfileRowsBatch, getFieldRowsBatch, getFieldRows, putFieldRowsBatch, putProfileRowsBatch, putFieldRows, putProfileRow, getProfileRow, findStaleFields, movieKey, yearOf, getVerdictsBatch, putVerdictsBatch, getFilmmapCache, getMetatakeExtendedCache, getSiteRatingForMovie, getSiteRatingsBatch } from "./db.js";
+import { getProfileRowsBatch, getFieldRowsBatch, getFieldRows, putFieldRowsBatch, putProfileRowsBatch, putFieldRows, putProfileRow, getProfileRow, findStaleFields, movieKey, yearOf, getVerdictsBatch, putVerdictsBatch, getFilmmapCache, getMetatakeExtendedCache, getSiteRatingForMovie, getSiteRatingsBatch, getVisualProfilesBatch } from "./db.js";
 import { callLLMWithFallback, getPromptTemplate } from "./llm.js";
 import { enrichClassic, sanitizePeopleField } from "./enrich.js";
 import { filmmapLocations, metatakeExtended, wikidataBatch, fetchSubtitleDensity } from "./sources.js";
@@ -30,6 +30,35 @@ const NUMERIC_BOUNDS = {
 };
 
 const MAX_STAGE2_GROUPS = 3;
+
+// Visual observations remain in visual_profile_fields; this creates an in-memory filter view only.
+function withVisualEvidence(textProfile, visualProfile) {
+  const profile = { ...(textProfile || {}) };
+  if (visualProfile?.analysisStatus !== "complete") return profile;
+  const vf = visualProfile.fields || {};
+  const meta = vf.visual_analysis_meta?.value || {};
+  const coverage = Number(meta.coverage ?? 0);
+  const sampleCount = Number(meta.validSampleCount ?? 0);
+  const enoughEvidence = sampleCount >= 8 && coverage >= 0.55;
+  if (!enoughEvidence) return profile;
+  const conflicts = [];
+  for (const field of ["day_ratio", "night_ratio", "indoor_ratio", "outdoor_ratio", "color_ratio"]) {
+    const item = vf[field], value = item?.value;
+    if (value === null || value === undefined || !Number.isFinite(Number(value)) || !Number.isFinite(Number(item.confidence)) || Number(item.confidence) < 0.55) continue;
+    const textValue = Number(profile[field]);
+    if (Number.isFinite(textValue) && Math.abs(textValue - Number(value)) >= 25) conflicts.push({ field, text: textValue, visual: Number(value), rule: "visual_primary_text_secondary" });
+    profile[field] = Number(value);
+  }
+  for (const field of ["technical_style", "color_style"]) {
+    const item = vf[field];
+    if (!Array.isArray(item?.value) || !Number.isFinite(Number(item.confidence)) || Number(item.confidence) < 0.6) continue;
+    const current = Array.isArray(profile[field]) ? profile[field] : [];
+    profile[field] = [...new Set([...current, ...item.value])];
+  }
+  if (vf.cinematography?.value) profile.visual_cinematography = vf.cinematography.value;
+  profile.visual_evidence = { provider: meta.provider || null, model: meta.model || null, method: meta.method || null, sampleCount, coverage, confidence: Number(vf.day_ratio?.confidence ?? vf.cinematography?.confidence ?? 0), conflicts };
+  return profile;
+}
 
 const CONFIDENCE = {
   STATIC: 0.95,
@@ -425,6 +454,7 @@ export async function handleResearchStream(env, body, controller, signal) {
     const allMovieIds = movies.map(m => movieKey(m)).filter(Boolean);
     const profilesMap = await getProfileRowsBatch(env, allMovieIds);
     const fieldsMap = await getFieldRowsBatch(env, allMovieIds);
+    const visualProfilesMap = await getVisualProfilesBatch(env, allMovieIds);
 
     const prepared = [];
 
@@ -443,7 +473,7 @@ export async function handleResearchStream(env, body, controller, signal) {
 
       const existing = profilesMap.get(movieId);
       const fieldRows = fieldsMap.get(movieId) || [];
-      const profile = existing?.data || {};
+      const profile = { ...(existing?.data || {}) };
 
       if (!profile.vote_average && movie.vote_average != null) {
         profile.vote_average = movie.vote_average;
@@ -519,10 +549,12 @@ export async function handleResearchStream(env, body, controller, signal) {
         });
       }
 
+      const filterProfile = withVisualEvidence(profile, visualProfilesMap.get(movieId));
       prepared.push({
         movie,
         movieId,
         profile,
+        filterProfile,
         fieldRows,
         staleDeterministic: [],
         filmmap: null,
@@ -938,8 +970,8 @@ export async function handleResearchStream(env, body, controller, signal) {
     // Taxonomy alanları yerel ilk elemede atlanır.
     const afterLocal = prepared.filter(p =>
       evaluateFilters(
-        p.profile,
-        filters,
+        p.filterProfile || p.profile,
+        { ...filters, includeUnknown: true },
         null,
         null,
         null,
@@ -1317,8 +1349,9 @@ export async function handleResearchStream(env, body, controller, signal) {
       try {
         const verdict = semanticVerdicts.get(p.movieId) || null;
 
+        const evalProfile = withVisualEvidence(p.profile, visualProfilesMap.get(p.movieId));
         const evalResult = evaluateFilters(
-          p.profile,
+          evalProfile,
           filters,
           verdict,
           p.metatakeLocations,

@@ -7,3 +7,5 @@ export * from "./filters.js";
 export * from "./enrich.js";
 export * from "./research.js";
 export * from "./config.js";
+
+export * from "./visual-analysis.js";

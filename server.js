@@ -1,10 +1,59 @@
 import { createServer } from "node:http";
 import { once } from "node:events";
+import sharp from "sharp";
+import { createHash } from "node:crypto";
 import worker from "./index.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const MAX_BODY_BYTES = Number(process.env.MAX_HTTP_BODY_BYTES || 20 * 1024 * 1024);
 const pendingTasks = new Set();
+
+const thumbnailCache = new Map();
+const THUMB_MAX_BYTES = 20 * 1024;
+function isAllowedImageHost(host) {
+  const h = String(host || "").toLowerCase();
+  return h === "image.tmdb.org" || h === "upload.wikimedia.org" || h.endsWith(".wikimedia.org") ||
+    h === "m.media-amazon.com" || h.endsWith(".media-amazon.com") || h === "images-na.ssl-images-amazon.com" || h === "crawlora.net" || h.endsWith(".crawlora.net") || h.endsWith(".imdb.com");
+}
+async function serveThumbnail(req, res, url) {
+  if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "GET gerekli." });
+  const source = url.searchParams.get("src") || "";
+  let parsed;
+  try { parsed = new URL(source); } catch { return sendJson(res, 400, { ok: false, error: "Geçersiz görsel adresi." }); }
+  if (parsed.protocol !== "https:" || !isAllowedImageHost(parsed.hostname)) return sendJson(res, 403, { ok: false, error: "Görsel kaynağı izinli değil." });
+  const cacheKey = createHash("sha256").update(source).digest("hex");
+  const cached = thumbnailCache.get(cacheKey);
+  if (cached) {
+    res.writeHead(200, { "Content-Type": "image/webp", "Content-Length": cached.length, "Cache-Control": "public, max-age=86400", "X-Image-Bytes": String(cached.length) });
+    return res.end(cached);
+  }
+  let upstream = await fetch(parsed, { redirect: "manual", signal: AbortSignal.timeout(12000), headers: { "User-Agent": "FilmKesifMotoru/1.0" } });
+  if (upstream.status >= 300 && upstream.status < 400) {
+    const location = upstream.headers.get("location");
+    let redirected;
+    try { redirected = new URL(location, parsed); } catch {}
+    if (!redirected || redirected.protocol !== "https:" || !isAllowedImageHost(redirected.hostname)) return sendJson(res, 502, { ok: false, error: "Görsel kaynağı güvenli olmayan yönlendirme yaptı." });
+    upstream = await fetch(redirected, { redirect: "manual", signal: AbortSignal.timeout(12000), headers: { "User-Agent": "FilmKesifMotoru/1.0" } });
+  }
+  if (!upstream.ok) return sendJson(res, 502, { ok: false, error: `Görsel kaynağı HTTP ${upstream.status}.` });
+  const type = (upstream.headers.get("content-type") || "").toLowerCase();
+  if (!type.startsWith("image/")) return sendJson(res, 415, { ok: false, error: "Kaynak bir görsel döndürmedi." });
+  const raw = Buffer.from(await upstream.arrayBuffer());
+  if (!raw.length || raw.length > 12 * 1024 * 1024) return sendJson(res, 413, { ok: false, error: "Kaynak görsel boyutu sınırı aşıyor." });
+  let output = null;
+  for (const width of [480, 400, 320, 260, 220, 180]) {
+    for (const quality of [66, 56, 46, 36, 28]) {
+      const candidate = await sharp(raw, { limitInputPixels: 40000000 }).rotate().resize({ width, withoutEnlargement: true }).webp({ quality, effort: 4 }).toBuffer();
+      if (candidate.length <= THUMB_MAX_BYTES) { output = candidate; break; }
+    }
+    if (output) break;
+  }
+  if (!output) return sendJson(res, 422, { ok: false, error: "Görsel 20 KB sınırına indirilemedi." });
+  if (thumbnailCache.size >= 1000) thumbnailCache.delete(thumbnailCache.keys().next().value);
+  thumbnailCache.set(cacheKey, output);
+  res.writeHead(200, { "Content-Type": "image/webp", "Content-Length": output.length, "Cache-Control": "public, max-age=86400", "X-Image-Bytes": String(output.length) });
+  res.end(output);
+}
 
 // Cloud Run bu servisi yalnızca test ortamı olarak çalıştırır.
 // Canlı Turso değişkenleri bulunsa bile DB adaptörü index.js içinde
@@ -71,6 +120,7 @@ const server = createServer(async (req, res) => {
   try {
     const host = req.headers.host || `localhost:${PORT}`;
     const url = new URL(req.url || "/", `http://${host}`);
+    if (url.pathname === "/image/thumbnail") return await serveThumbnail(req, res, url);
 
     // Cloud Scheduler için korumalı, test-only dakikalık görev endpoint'i.
     if (url.pathname === "/internal/run-admin-tasks") {

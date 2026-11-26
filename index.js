@@ -13,7 +13,7 @@ import {
   isAdmin, response, jsonError, omdb, tmdbRoute, handleImages, handleMovieDetails, handleResearchStream,
   getAllConfig, getLlmStats, getActiveDeadKeys, getFilterInfoAll, getAllStaticOptions,
   getMovieLists, metatakeExtended, filmmapLocations, deadKeysCache, safeJSON, getKeyHealth,
-  tmdb, getSiteRatingForMovie
+  tmdb, getSiteRatingForMovie, analyzeVisualMovie
 } from "./worker-core.js";
 
 const CORS = {
@@ -296,6 +296,14 @@ async function handleRequest(request, env, ctx) {
     if (url.pathname.startsWith("/tmdb/")) return response(await tmdbRoute(env, url, request.signal));
     if (url.pathname === "/omdb") { const params = {}; for (const k of ["i","t","y","type"]) if (url.searchParams.has(k)) params[k] = url.searchParams.get(k); return response(await omdb(env, params, request.signal)); }
     if (url.pathname === "/images") return response(await handleImages(env, url, request.signal));
+    if (url.pathname === "/visual/analyze" && request.method === "POST") {
+      const user = await getCurrentUserWithAdminBridge(env, request);
+      if (!user) return jsonError("Görsel analizi için giriş yapmalısınız.", 401);
+      let body; try { body = await request.json(); } catch { return jsonError("Geçersiz JSON.", 400); }
+      if (!body?.movieId) return jsonError("movieId gerekli.", 400);
+      try { return response(await analyzeVisualMovie(env, body.movieId, request.signal)); }
+      catch (error) { console.error("[visual-analysis]", error?.message || error); return jsonError(error.message || "Görsel analiz başarısız.", error.status || 502); }
+    }
     if (url.pathname === "/movie/details" && request.method === "POST") { let body; try { body = await request.json(); } catch { return jsonError("Geçersiz JSON.", 400); } return response(await handleMovieDetails(env, body, request.signal)); }
     if (url.pathname === "/research" || url.pathname === "/llm-interactions") {
       if (request.method !== "POST") return jsonError("Bu uç nokta POST bekliyor.", 405);
