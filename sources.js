@@ -1,6 +1,7 @@
 // sources.js — omdbBest: prefixsiz ID'ye sadece "tt" ekle, sıfırları temizleme (Se7en tt0114369 kritik düzeltme)
 // Faz 3: omdb() in-memory cache (5dk TTL, max 100 entry) — OMDb kotasını 2x korur
 import { safeJSON, movieKey, yearOf, norm, getFilmmapCache, putFilmmapCache, getMetatakeExtendedCache, putMetatakeExtendedCache } from "./db.js";
+import { crawloraStillFrames } from "./crawlora-images.js";
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const USER_AGENT = "FilmKesifMotoru/1.0 (https://github.com/VefaEser/film-proxy; contact:vefaeser@ornitonerenk.com)";
@@ -265,7 +266,30 @@ async function tmdbBackdrops(env, movie, outerSignal) { if (!movie.id) return []
 async function wikidataBatchOnce(env, movies, timeoutMs, outerSignal) { const results = new Map(); if (!movies.length) return results; const rows = movies.map(m => { const title = (m.original_title || m.title || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"'); return `("${title}"@en ${m.id})`; }).join(" "); const query = `SELECT ?movieId ?item ?originalWorkLabel ?filmingLocationLabel ?filmingCountryLabel ?award ?awardLabel ?nominatedLabel WHERE { VALUES (?title ?movieId) { ${rows} } ?item rdfs:label ?title . ?item wdt:P31 wd:Q11424 . OPTIONAL { ?item wdt:P144 ?originalWork. } OPTIONAL { ?item wdt:P915 ?filmingLocation. } OPTIONAL { ?filmingLocation wdt:P17 ?filmingCountry. } OPTIONAL { ?item wdt:P166 ?award. } OPTIONAL { ?item wdt:P1411 ?nominated. } SERVICE wikibase:label { bd:serviceParam wikibase:language "en,tr". } } LIMIT 300`; const url = "https://query.wikidata.org/sparql?query=" + encodeURIComponent(query); const data = await fetchJSON(url, { headers: { "Accept": "application/sparql-results+json", "User-Agent": USER_AGENT } }, "Wikidata", timeoutMs, outerSignal); const bindings = data.results?.bindings || []; const byId = new Map(); for (const b of bindings) { const id = b.movieId?.value || ""; if (!byId.has(id)) byId.set(id, { originalWork: null, locations: new Set(), countries: new Set(), awards: new Set(), nominations: new Set() }); const rec = byId.get(id); if (b.originalWorkLabel?.value) rec.originalWork = b.originalWorkLabel.value; if (b.filmingLocationLabel?.value) rec.locations.add(b.filmingLocationLabel.value); if (b.filmingCountryLabel?.value) rec.countries.add(b.filmingCountryLabel.value); const aq = b.award?.value || ""; if (aq) { const q = aq.split("/").pop(); if (/^Q\d+$/.test(q)) rec.awards.add(q); } const nq = b.nominated?.value || ""; if (nq) { const q = nq.split("/").pop(); if (/^Q\d+$/.test(q)) rec.nominations.add(q); } } for (const [id, rec] of byId) results.set(id, { originalWork: rec.originalWork, filmingLocations: [...rec.locations], filmingCountries: [...rec.countries], awards: [...rec.awards], nominations: [...rec.nominations] }); return results; }
 export async function wikidataBatch(env, movies, outerSignal) { try { return await wikidataBatchOnce(env, movies, 25000, outerSignal); } catch (e) { console.warn("wikidata batch:", e.message); return new Map(); } }
 
-export async function handleImages(env, url, signal) { const id = url.searchParams.get("id"); const title = url.searchParams.get("title") || ""; const originalTitle = url.searchParams.get("original_title") || title; const movie = { id, title, original_title: originalTitle }; const [tmdbList, commonsList] = await Promise.all([tmdbBackdrops(env, movie, signal).catch(e => { console.warn("tmdb backdrops:", e.message); return []; }), commonsScenes(env, movie, signal).catch(e => { console.warn("commons scenes:", e.message); return []; })]); const tmdbSorted = [...tmdbList].sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0)); const seen = new Set(); const merged = []; for (const img of [...tmdbSorted, ...commonsList]) { const key = String(img.url || "").split("/").pop().split("?")[0].toLowerCase(); if (!key || seen.has(key)) continue; seen.add(key); merged.push(img); if (merged.length >= 20) break; } return { images: merged }; }
+export async function handleImages(env, url, signal) {
+  const id = url.searchParams.get("id");
+  const title = url.searchParams.get("title") || "";
+  const originalTitle = url.searchParams.get("original_title") || title;
+  const imdbId = url.searchParams.get("imdb_id") || url.searchParams.get("imdbId") || "";
+  const movie = { id, title, original_title: originalTitle };
+  const [tmdbList, commonsList, crawloraList] = await Promise.all([
+    tmdbBackdrops(env, movie, signal).catch(e => { console.warn("tmdb backdrops:", e.message); return []; }),
+    commonsScenes(env, movie, signal).catch(e => { console.warn("commons scenes:", e.message); return []; }),
+    crawloraStillFrames(env, imdbId, signal).catch(e => { console.warn("crawlora still frames:", e.message); return []; })
+  ]);
+  const tmdbSorted = [...tmdbList].sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+  const seen = new Set();
+  const merged = [];
+  // Sahne kareleri önce gelir; TMDB backdrop ve Commons mevcut galeri yedeği olarak korunur.
+  for (const img of [...crawloraList, ...tmdbSorted, ...commonsList]) {
+    const key = String(img.source_id || img.url || "").split("/").pop().split("?")[0].toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    merged.push(img);
+    if (merged.length >= 20) break;
+  }
+  return { images: merged, counts: { crawlora: crawloraList.length, tmdb: tmdbList.length, commons: commonsList.length }, imdbId: imdbId || null };
+}
 
 export async function tmdbRoute(env, url, signal) {
   initKeys(env);
