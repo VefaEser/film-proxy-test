@@ -2,5 +2,11 @@
   "type": "module",
   "dependencies": {
     "@libsql/client": "^0.18.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

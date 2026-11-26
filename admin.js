@@ -917,6 +917,17 @@ if (path === "/bulk/task/resume" && request.method === "POST") {
 // ============================================================
 
 
+if (path === "/hf-import/file/sessions" && request.method === "GET") {
+      const { results } = await env.DB.prepare(`
+        SELECT id, file_hash, file_name, source_dataset, total_rows, next_row,
+               inserted_rows, status, created_at, updated_at, finished_at
+        FROM csv_import_sessions
+        WHERE owner_type='admin' AND owner_id=?
+        ORDER BY updated_at DESC LIMIT 25
+      `).bind(sess.user_id).all();
+      return jsonRes({ ok: true, sessions: results || [] });
+    }
+
 if (path === "/hf-import/file/start" && request.method === "POST") {
       let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
       const fileHash = String(body.fileHash || "").toLowerCase();
@@ -955,7 +966,7 @@ if (path === "/hf-import/file/start" && request.method === "POST") {
       const sessionId = String(body.sessionId || "");
       const chunkIndex = Number(body.chunkIndex), startRow = Number(body.startRow);
       const rows = Array.isArray(body.rows) ? body.rows : [];
-      if (!sessionId || !Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || !Number.isSafeInteger(startRow) || startRow < 0 || !rows.length || rows.length > 100) return jsonErr("CSV parçası geçersiz (en fazla 100 satır)", 400);
+      if (!sessionId || !Number.isSafeInteger(chunkIndex) || chunkIndex < 0 || !Number.isSafeInteger(startRow) || startRow < 0 || !rows.length || rows.length > 1000) return jsonErr("CSV parçası geçersiz (en fazla 1.000 satır)", 400);
       const session = await env.DB.prepare("SELECT * FROM csv_import_sessions WHERE id=? AND owner_type='admin' AND owner_id=?")
         .bind(sessionId, sess.user_id).first();
       if (!session) return jsonErr("Aktarım kaydı bulunamadı", 404);

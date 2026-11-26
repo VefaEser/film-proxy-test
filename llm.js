@@ -229,6 +229,76 @@ async function callGeminiGenerate(env, key, model, prompt, outerSignal) {
   const usage = extractGeminiUsage(data);
   return { text, ...usage };
 }
+async function callGeminiStreamGenerate(env, key, model, prompt, outerSignal) {
+  // Gerçek yanıt testi geçmiş model/yöntem çifti: gemini-3.6-flash.
+  // Diğer modeller için destek doğrulanmadan streaming denenmez.
+  if (normalizeModelName(model) !== "gemini-3.6-flash") {
+    throw new Error(`StreamGenerateContent ${model} için doğrulanmış destek kaydı yok.`);
+  }
+  const url = `${GOOGLE_GENERATE}/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
+  const signals = [outerSignal, AbortSignal.timeout(25000)].filter(Boolean);
+  const signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    signal
+  });
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 300);
+    const error = new Error(`Gemini streamGenerateContent ${model}: HTTP ${res.status} ${body}`);
+    error.status = res.status;
+    if (res.status === 429) error.retryAfterMs = Number(res.headers.get("retry-after") || 60) * 1000;
+    throw error;
+  }
+  if (!res.body) throw new Error(`Gemini streamGenerateContent ${model}: boş stream gövdesi.`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "", text = "", finishReason = null, usage = null, modelVersion = null;
+  const consume = (raw) => {
+    const payload = raw.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).join("\n");
+    if (!payload || payload === "[DONE]") return;
+    const data = safeJSON(payload, null);
+    if (!data) throw new Error("Gemini streamGenerateContent: geçersiz SSE JSON olayı.");
+    const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+    for (const candidate of candidates) {
+      const parts = candidate?.content?.parts || [];
+      for (const part of parts) if (typeof part?.text === "string") text += part.text;
+      if (candidate?.finishReason) finishReason = candidate.finishReason;
+    }
+    if (data.usageMetadata) usage = data.usageMetadata;
+    if (data.modelVersion) modelVersion = data.modelVersion;
+    if (data.error) throw new Error(data.error.message || "Gemini stream sağlayıcı hatası.");
+  };
+  try {
+    while (true) {
+      throwIfAborted(outerSignal);
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      let boundary;
+      while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+        const event = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        consume(event);
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) consume(buffer);
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  if (!text.trim()) throw new Error(`Gemini streamGenerateContent ${model}: metin içermeyen yanıt.`);
+  if (finishReason !== "STOP") throw new Error(`Gemini streamGenerateContent ${model}: tamamlanmamış yanıt (finishReason=${finishReason || "missing"}).`);
+  return {
+    text,
+    promptTokens: usage?.promptTokenCount ?? null,
+    outputTokens: usage?.candidatesTokenCount ?? null,
+    modelVersion,
+    finishReason
+  };
+}
+
 async function callGeminiModel(env, key, model, prompt, outerSignal) {
   const errors = [];
   try {
@@ -246,6 +316,13 @@ async function callGeminiModel(env, key, model, prompt, outerSignal) {
   } catch (e) {
     if (outerSignal?.aborted || e?.name === "AbortError") throw makeAbortError();
     errors.push(`generateContent: ${String(e.message || e).slice(0, 150)}`);
+  }
+  throwIfAborted(outerSignal);
+  try {
+    return await callGeminiStreamGenerate(env, key, model, prompt, outerSignal);
+  } catch (e) {
+    if (outerSignal?.aborted || e?.name === "AbortError") throw makeAbortError();
+    errors.push(`streamGenerateContent: ${String(e.message || e).slice(0, 150)}`);
     throw new Error(errors.join(" | "));
   }
 }

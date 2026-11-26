@@ -249,34 +249,137 @@ function movieIdFromImdb(imdbId) { return "imdb:" + String(imdbId || "").replace
 
 async function importCsv(env, userId, listType, items, atomicTail = null) {
   if (!env.DB) throw new Error("DB yok");
-  const now = Math.floor(Date.now() / 1000); let added = 0, skipped = 0, conflicts = 0, withRating = 0;
-  const allExisting = await env.DB.prepare("SELECT list_type, imdb_id FROM user_movies WHERE user_id = ? AND list_type IN ('watched','want','wont')").bind(userId).all();
-  const byImdb = new Map();
-  for (const r of allExisting.results || []) { if (!r.imdb_id) continue; const key = cleanImdb(r.imdb_id); if (!byImdb.has(key)) byImdb.set(key, new Set()); byImdb.get(key).add(r.list_type); }
-  const stmts = [];
-  const ratingSamples = [];
-  for (const it of items) {
-    const cleanId = cleanImdb(it.imdbId);
-    if (!cleanId) { skipped++; continue; }
-    const conflicting = byImdb.get(cleanId); if (conflicting && [...conflicting].some(t => t !== listType)) { conflicts++; continue; }
-    if (it.userRating != null && ratingSamples.length < 5) ratingSamples.push(`${cleanId}=${it.userRating}`);
-    stmts.push(env.DB.prepare(`INSERT INTO user_movies (user_id, list_type, movie_id, imdb_id, tmdb_id, title_original, title_tr, url, year, imdb_rating, imdb_votes, runtime, genres, directors, user_rating, source, source_meta_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'csv', NULL, ?, ?) ON CONFLICT(user_id, list_type, movie_id) DO UPDATE SET title_original = excluded.title_original, title_tr = excluded.title_tr, url = excluded.url, year = excluded.year, imdb_rating = excluded.imdb_rating, imdb_votes = excluded.imdb_votes, runtime = excluded.runtime, genres = excluded.genres, directors = excluded.directors, user_rating = COALESCE(excluded.user_rating, user_movies.user_rating), tmdb_id = COALESCE(excluded.tmdb_id, user_movies.tmdb_id), source = excluded.source, updated_at = excluded.updated_at`).bind(userId, listType, movieIdFromImdb(cleanId), cleanId, it.tmdbId || null, it.titleOriginal, it.titleTr, it.url || null, it.year, it.imdbRating, it.imdbVotes, it.runtime, it.genres, it.directors, it.userRating ?? null, now, now));
-    added++;
-    if (it.userRating != null) withRating++;
+  if (!["watched", "want", "wont"].includes(listType)) throw new Error("Geçersiz liste türü");
+  const now = Math.floor(Date.now() / 1000);
+  let added = 0, skipped = 0, conflicts = 0, withRating = 0;
+
+  // IMDb/TMDB kimliklerinden mevcut kaydı bul; aynı filmi başka listede
+  // görürsek hedef listeye taşırken kullanıcı verilerini koru.
+  const existingResult = await env.DB.prepare(`
+    SELECT *
+    FROM user_movies
+    WHERE user_id = ? AND list_type IN ('watched','want','wont')
+  `).bind(userId).all();
+  const existing = existingResult.results || [];
+  const byImdb = new Map(), byTmdb = new Map(), byMovie = new Map();
+  for (const row of existing) {
+    if (row.imdb_id) {
+      const k = cleanImdb(row.imdb_id);
+      if (!byImdb.has(k)) byImdb.set(k, []);
+      byImdb.get(k).push(row);
+    }
+    if (row.tmdb_id) {
+      const k = String(row.tmdb_id);
+      if (!byTmdb.has(k)) byTmdb.set(k, []);
+      byTmdb.get(k).push(row);
+    }
+    if (row.movie_id) {
+      if (!byMovie.has(String(row.movie_id))) byMovie.set(String(row.movie_id), []);
+      byMovie.get(String(row.movie_id)).push(row);
+    }
   }
+
+  const rowGroups = [];
+  const seenInCsv = new Set();
+  for (const it of items) {
+    const imdb = cleanImdb(it.imdbId);
+    const tmdb = it.tmdbId ? String(it.tmdbId) : "";
+    if (!imdb && !tmdb) { skipped++; continue; }
+    const canonical = imdb ? `imdb:${imdb}` : `tmdb:${tmdb}`;
+    if (seenInCsv.has(canonical)) { skipped++; continue; }
+    seenInCsv.add(canonical);
+
+    const matches = new Map();
+    for (const row of [
+      ...(imdb ? (byImdb.get(imdb) || []) : []),
+      ...(tmdb ? (byTmdb.get(tmdb) || []) : []),
+      ...(imdb ? (byMovie.get(`imdb:${imdb}`) || []) : []),
+      ...(tmdb ? (byMovie.get(`tmdb:${tmdb}`) || []) : [])
+    ]) matches.set(`${row.list_type}|${row.movie_id}`, row);
+    const priorRows = [...matches.values()];
+    const bestPrior = [...priorRows].sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0))[0] || null;
+    const preservedRating = priorRows.find(r => r.user_rating != null)?.user_rating ?? null;
+
+    // Aynı film başka bir listede ise oradan kaldır; puan ve kişisel alanlar
+    // yeni hedef kaydında korunur. Bu iki SQL aynı Turso batch işlemi içindedir.
+    const movieId = imdb ? `imdb:${imdb}` : `tmdb:${tmdb}`;
+    const staleMovieIds = [...new Set(priorRows
+      .filter(r => String(r.movie_id) !== movieId)
+      .map(r => String(r.movie_id)))];
+    const rowStatements = [];
+    if (staleMovieIds.length) {
+      const placeholders = staleMovieIds.map(() => "?").join(",");
+      rowStatements.push(env.DB.prepare(`DELETE FROM user_movies
+        WHERE user_id = ? AND list_type IN ('watched','want','wont')
+          AND movie_id IN (${placeholders})`)
+        .bind(userId, ...staleMovieIds));
+    }
+
+    const titleOriginal = String(it.titleOriginal || "").trim() || null;
+    const titleTr = String(it.titleTr || "").trim() || null;
+    const url = String(it.url || "").trim() || null;
+    const genres = String(it.genres || "").trim() || null;
+    const directors = String(it.directors || "").trim() || null;
+    const csvRating = it.userRating ?? null;
+    rowStatements.push(env.DB.prepare(`
+      INSERT INTO user_movies (
+        user_id, list_type, movie_id, imdb_id, tmdb_id, title_original, title_tr,
+        url, year, imdb_rating, imdb_votes, runtime, genres, directors,
+        user_rating, source, source_meta_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, list_type, movie_id) DO UPDATE SET
+        imdb_id = COALESCE(excluded.imdb_id, user_movies.imdb_id),
+        tmdb_id = COALESCE(excluded.tmdb_id, user_movies.tmdb_id),
+        title_original = COALESCE(excluded.title_original, user_movies.title_original),
+        title_tr = COALESCE(excluded.title_tr, user_movies.title_tr),
+        url = COALESCE(excluded.url, user_movies.url),
+        year = COALESCE(excluded.year, user_movies.year),
+        imdb_rating = COALESCE(excluded.imdb_rating, user_movies.imdb_rating),
+        imdb_votes = COALESCE(excluded.imdb_votes, user_movies.imdb_votes),
+        runtime = COALESCE(excluded.runtime, user_movies.runtime),
+        genres = COALESCE(excluded.genres, user_movies.genres),
+        directors = COALESCE(excluded.directors, user_movies.directors),
+        user_rating = COALESCE(user_movies.user_rating, excluded.user_rating),
+        source = COALESCE(user_movies.source, excluded.source),
+        source_meta_json = COALESCE(user_movies.source_meta_json, excluded.source_meta_json),
+        updated_at = excluded.updated_at
+    `).bind(userId, listType, movieId, imdb || bestPrior?.imdb_id || null,
+      it.tmdbId || bestPrior?.tmdb_id || null,
+      titleOriginal || bestPrior?.title_original || null,
+      titleTr || bestPrior?.title_tr || null,
+      url || bestPrior?.url || null,
+      it.year || bestPrior?.year || null,
+      it.imdbRating || bestPrior?.imdb_rating || null,
+      it.imdbVotes || bestPrior?.imdb_votes || null,
+      it.runtime || bestPrior?.runtime || null,
+      genres || bestPrior?.genres || null,
+      directors || bestPrior?.directors || null,
+      preservedRating ?? csvRating,
+      bestPrior?.source || "csv", bestPrior?.source_meta_json || null,
+      bestPrior?.created_at || now, now));
+    rowGroups.push(rowStatements);
+
+    added++;
+    if (preservedRating != null || csvRating != null) withRating++;
+  }
+
   if (atomicTail) {
-    const tail = typeof atomicTail === "function" ? atomicTail({ added, skipped, conflicts, withRating }) : atomicTail;
-    await env.DB.batch([...stmts, ...tail]);
+    const tail = typeof atomicTail === "function"
+      ? atomicTail({ added, skipped, conflicts, withRating })
+      : atomicTail;
+    await env.DB.batch([...rowGroups.flat(), ...tail]);
   } else {
-    for (let i = 0; i < stmts.length; i += 40) await env.DB.batch(stmts.slice(i, i + 40));
+    // Her film için eski kaydı kaldırma + hedef listeye yazma aynı batch'te kalır.
+    for (let i = 0; i < rowGroups.length; i += 40) {
+      await env.DB.batch(rowGroups.slice(i, i + 40).flat());
+    }
   }
   if (items.length > 0 && withRating === 0) {
-    console.warn(`[importCsv] UYARI: ${items.length} satır eklendi ama hiçbirinde puan okunamadı.`);
-  } else {
-    console.log(`[importCsv] ${items.length} satır, ${withRating} satırda puan okundu. Örnekler: ${ratingSamples.join(", ")}`);
+    console.warn(`[importCsv] UYARI: ${items.length} satırda kullanıcı puanı bulunamadı.`);
   }
   return { added, skipped, conflicts, withRating };
 }
+
 async function importCsvSessionStart(env, userId, body) {
   const listType = String(body.listType || "");
   const fileHash = String(body.fileHash || "").toLowerCase();
