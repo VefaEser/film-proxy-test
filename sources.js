@@ -267,27 +267,44 @@ async function commonsScenes(env, movie, outerSignal) {
   url.searchParams.set("generator", "search");
   url.searchParams.set("gsrsearch", `filetype:bitmap "${title}" (film still OR movie scene OR screenshot)`);
   url.searchParams.set("gsrnamespace", "6"); url.searchParams.set("gsrlimit", "50");
-  url.searchParams.set("prop", "imageinfo"); url.searchParams.set("iiprop", "url|extmetadata|size");
-  url.searchParams.set("iiurlwidth", "640");
+  url.searchParams.set("prop", "imageinfo|categories"); url.searchParams.set("iiprop", "url|extmetadata|size");
+  url.searchParams.set("cllimit", "50"); url.searchParams.set("iiurlwidth", "640");
   const data = await fetchJSON(url.toString(), { headers: { "User-Agent": USER_AGENT } }, "Wikimedia Commons", 18000, outerSignal);
   const pages = Object.values(data.query?.pages || {});
   return pages.map(p => {
     const i = p.imageinfo?.[0] || {}, meta = i.extmetadata || {};
-    return { source: "commons", source_id: p.pageid ? `commons:${p.pageid}` : p.title, image_type: "still_frame", title: p.title || "", description: meta.ImageDescription?.value || "", categories: meta.Categories?.value || "", url: i.thumburl || i.url || "", pageUrl: i.descriptionurl || "", license: meta.LicenseShortName?.value || "", attribution: meta.Artist?.value || "", width: Number(i.thumbwidth || i.width) || 0, height: Number(i.thumbheight || i.height) || 0, vote_average: 0 };
+    return { source: "commons", source_id: p.pageid ? `commons:${p.pageid}` : p.title, image_type: "still_frame", title: p.title || "", description: meta.ImageDescription?.value || "", categories: (Array.isArray(p.categories) ? p.categories.map(c => c.title || "").join(" ") : "") || meta.Categories?.value || "", url: i.thumburl || i.url || "", pageUrl: i.descriptionurl || "", license: meta.LicenseShortName?.value || "", attribution: meta.Artist?.value || "", width: Number(i.thumbwidth || i.width) || 0, height: Number(i.thumbheight || i.height) || 0, vote_average: 0 };
   }).filter(x => x.url && isLikelySceneImage(x, title));
 }
+function stripCommonsMarkup(value = "") {
+  return String(value || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&")
+    .replace(/&#\d+;/g, " ").replace(/&quot;/gi, '"')
+    .replace(/\s+/g, " ").trim();
+}
+function normalizeImageMatchText(value = "") {
+  return stripCommonsMarkup(value).toLowerCase().normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "").replace(/[_-]+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
 function isLikelySceneImage(img, movieTitle = "") {
-  const text = `${img.title || ""} ${img.description || ""} ${img.categories || ""}`
-    .toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
-  if (/(poster|portrait|headshot|actor|actress|cast|logo|cover|selfie|signature|autograph|award|festival|premiere)/.test(text)) return false;
-  // Commons search is broad and frequently returns files that merely mention
-  // cinema. Require both a scene/still indicator and a meaningful title match.
-  if (!/(still|scene|screenshot|frame|film still|movie still)/.test(text)) return false;
-  const title = String(movieTitle || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
-  const tokens = title.split(/[^\p{L}\p{N}]+/u).filter(t => t.length >= 3);
+  // Commons aramasında açıklama metnindeki tesadüfi "film/frame" sözcükleri
+  // eşleşme sayılmamalı. Kanıt yalnızca dosya adı ve kategorilerden alınır.
+  const file = normalizeImageMatchText(img.title || "");
+  const categories = normalizeImageMatchText(img.categories || "");
+  const evidence = `${file} ${categories}`;
+  if (/(^| )(poster|portrait|headshot|actor|actress|cast|logo|cover|selfie|signature|autograph|award|festival|premiere|monument|book|engraving)( |$)/.test(evidence)) return false;
+  const sceneEvidence = /\b(film|movie|production) stills?\b|\b(film|movie) scenes?\b|\b(screenshot|screen capture|film frame|movie frame)\b/.test(evidence);
+  if (!sceneEvidence) return false;
+  const title = normalizeImageMatchText(movieTitle);
+  const tokens = title.split(/\s+/).filter(t => t.length >= 3);
   if (!tokens.length) return false;
-  const matched = tokens.filter(token => text.includes(token)).length;
-  return text.includes(title) || matched / tokens.length >= 0.75;
+  // Dosya adında tam başlık veya başlığın tüm anlamlı kelimeleri bulunmalı.
+  const fileHasFullTitle = file.includes(title);
+  const fileMatched = tokens.filter(token => file.includes(token)).length;
+  const categoryMatched = tokens.filter(token => categories.includes(token)).length;
+  return fileHasFullTitle || fileMatched === tokens.length || categoryMatched === tokens.length;
 }
 async function tmdbBackdrops(env, movie, outerSignal) {
   if (!movie.id) return [];
@@ -300,20 +317,34 @@ async function tmdbBackdrops(env, movie, outerSignal) {
   })).filter(x => x.url);
 }
 async function wikidataImages(env, imdbId, outerSignal) {
-  if (!/^tt\d{5,12}$/.test(String(imdbId || ""))) return [];
-  const query = `SELECT ?item ?itemLabel ?image WHERE { ?item wdt:P345 "${imdbId}"; wdt:P18 ?image. SERVICE wikibase:label { bd:serviceParam wikibase:language "en,tr". } } LIMIT 12`;
+  const diagnostics = { requested: 0, bindings: 0, accepted: 0, rejectedNoSceneEvidence: 0, reason: null };
+  if (!/^tt\d{5,12}$/.test(String(imdbId || ""))) {
+    diagnostics.reason = "invalid_or_missing_imdb_id";
+    const empty = []; empty.diagnostics = diagnostics; return empty;
+  }
+  diagnostics.requested = 1;
+  const query = `SELECT ?item ?itemLabel ?image WHERE { ?item wdt:P345 "${imdbId}"; wdt:P18 ?image. SERVICE wikibase:label { bd:serviceParam wikibase:language "en,tr". } } LIMIT 30`;
   const url = "https://query.wikidata.org/sparql?query=" + encodeURIComponent(query);
   const data = await fetchJSON(url, { headers: { "Accept": "application/sparql-results+json", "User-Agent": USER_AGENT } }, "Wikidata images", 18000, outerSignal);
-  return (data.results?.bindings || []).map((b, i) => {
+  const bindings = data.results?.bindings || [];
+  diagnostics.bindings = bindings.length;
+  const results = bindings.map((b, i) => {
     const rawImageUrl = b.image?.value || "";
     const imageUrl = rawImageUrl.replace(/^http:\/\//i, "https://");
-    const fileName = decodeURIComponent(imageUrl.split("/").pop() || "").toLowerCase();
+    const fileName = decodeURIComponent(imageUrl.split("/").pop() || "").replace(/_/g, " ").toLowerCase();
+    const sceneNameMatch = /\b(still|scene|frame|screenshot|film[ ._-]?still|movie[ ._-]?still|production[ ._-]?still)\b/i.test(fileName);
+    if (!sceneNameMatch) diagnostics.rejectedNoSceneEvidence++;
     return { source: "wikidata", source_id: `wikidata:${imageUrl || i}`, image_type: "still_frame",
-      title: b.itemLabel?.value || fileName, description: "Wikidata P18; sahne karesi olduğu dosya adıyla doğrulanmalı",
+      title: b.itemLabel?.value || fileName,
+      description: "Wikidata P18; yalnızca dosya adında sahne/kare kanıtı bulunan görseller kabul edilir",
       url: imageUrl, pageUrl: b.item?.value || "", license: "Commons dosya sayfasında doğrulanmalı",
       attribution: "Wikidata / bağlı medya", width: 0, height: 0, position: i + 1, vote_average: 0,
-      sceneNameMatch: /(still|scene|frame|screenshot|film.?still)/i.test(fileName) };
+      sceneNameMatch };
   }).filter(x => /^https:\/\//i.test(x.url) && x.sceneNameMatch);
+  diagnostics.accepted = results.length;
+  if (!results.length) diagnostics.reason = bindings.length ? "no_scene_evidence_in_p18_filenames" : "no_p18_images_for_imdb_id";
+  results.diagnostics = diagnostics;
+  return results;
 }
 function imageDedupeKey(img) {
   try { const u = new URL(img.url); return `${u.hostname.toLowerCase()}${u.pathname.toLowerCase()}`; }
@@ -324,13 +355,13 @@ function imageDedupeKey(img) {
 // tekrarlarını ayıklıyoruz. Aksi halde TMDB ve Crawlora'daki farklı kareler
 // aynı başlığı taşıdığı için yanlışlıkla eleniyordu.
 function selectRepresentativeImages(groups, limit = 20) {
-  // Kaynakların tamamı sorgulanır. Öncelik korunurken tek bir kaynağın
-  // galeriyi tamamen doldurmasını önlemek için başlangıç dağılımı ağırlıklıdır.
-  const sourceOrder = ["crawlora", "tmdb", "commons", "wikidata"];
-  const sourceCaps = { crawlora: 10, tmdb: 6, commons: 3, wikidata: 1 };
+  // Kalite önceliği: Crawlora sahne kareleri, ardından TMDB backdrops.
+  // Commons yalnızca dosya adı/kategori düzeyinde güçlü sahne kanıtı verirse
+  // son çare olarak kullanılır; Wikidata da aynı şekilde sıkı filtrelenir.
+  const sourceOrder = ["crawlora", "tmdb", "wikidata", "commons"];
+  const sourceCaps = { crawlora: 14, tmdb: 6, wikidata: 1, commons: 1 };
   const seen = new Set();
   const uniqueBySource = Object.fromEntries(sourceOrder.map(source => [source, []]));
-
   for (const source of sourceOrder) {
     for (const image of groups[source] || []) {
       const key = imageDedupeKey(image);
@@ -341,17 +372,14 @@ function selectRepresentativeImages(groups, limit = 20) {
       uniqueBySource[source].push(image);
     }
   }
-
   const pickSpaced = (items, count) => {
     if (items.length <= count) return items.slice();
     if (count <= 1) return [items[0]];
     return Array.from({ length: count }, (_, i) => items[Math.round(i * (items.length - 1) / (count - 1))]);
   };
-
   const ordered = [];
   const chosen = new Set();
-  // Ensimmäinen vaihe: Crawlora öncelikli, ancak diğer kaynaklara da yer ayır.
-  for (const source of sourceOrder) {
+  for (const source of ["crawlora", "tmdb"]) {
     const candidates = pickSpaced(uniqueBySource[source], Math.min(sourceCaps[source], limit));
     for (const image of candidates) {
       if (ordered.length >= limit) break;
@@ -359,18 +387,26 @@ function selectRepresentativeImages(groups, limit = 20) {
       chosen.add(image);
     }
   }
-  // İkinci aşama: kaynaklar kota dolduramadıysa kalan görselleri öncelik sırasıyla ekle.
-  for (const source of sourceOrder) {
+  // Önce iki güvenilir kaynağın bütün uygun kareleriyle 20'yi tamamla.
+  for (const source of ["crawlora", "tmdb"]) {
     for (const image of uniqueBySource[source]) {
       if (ordered.length >= limit) break;
       if (chosen.has(image)) continue;
-      ordered.push(image);
-      chosen.add(image);
+      ordered.push(image); chosen.add(image);
+    }
+  }
+  // Wikidata ve Commons yalnızca Crawlora + TMDB toplamı 20'ye ulaşamazsa
+  // son çare olarak değerlendirilir.
+  for (const source of ["wikidata", "commons"]) {
+    for (const image of uniqueBySource[source]) {
+      if (ordered.length >= limit) break;
+      if (chosen.has(image)) continue;
+      ordered.push(image); chosen.add(image);
     }
   }
   return ordered.slice(0, limit).map((x, i) => ({ ...x, sample_order: i + 1, source_type: "still_frame" }));
 }
-const VISUAL_SAMPLE_POLICY_VERSION = 5;
+const VISUAL_SAMPLE_POLICY_VERSION = 6;
 const VISUAL_SAMPLE_CACHE_TTL_SECONDS = 6 * 60 * 60;
 
 async function loadVisualSampleSetMeta(env, movieId) {
@@ -495,6 +531,7 @@ export async function handleImages(env, url, signal) {
   try { groups.wikidata = await wikidataImages(env, imdbId, signal); }
   catch (e) { console.warn("wikidata images:", e.message); counts.sourceErrors.wikidata = String(e?.message || e).slice(0, 240); }
   counts.wikidata = groups.wikidata.length;
+  counts.wikidataDiagnostics = groups.wikidata.diagnostics || { requested: 0, bindings: 0, accepted: 0, reason: "not_run" };
 
   const selected = selectRepresentativeImages(groups, 20);
   counts.fetchedBySource = {
