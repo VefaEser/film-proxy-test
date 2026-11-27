@@ -93,15 +93,26 @@ export default async function handler(req, res) {
     // vercel.json, her genel URL'yi bu sabit Node.js Function'a yönlendirir.
     // Wildcard parametresi destination query'sine açıkça aktarılır.
     // Parametre yoksa sessizce "/" yoluna düşmek yerine yönlendirme hatasını görünür kıl.
-    const routedPath = incoming.searchParams.get("__vercel_route_path");
-    if (routedPath === null) {
-      return sendJson(res, 400, {
-        ok: false,
-        function: "api/worker.js",
-        error: "Vercel yönlendirme yolu parametresi alınamadı.",
-        receivedPath: incoming.pathname
-      });
-    }
+const routedPath = incoming.searchParams.get("__vercel_route_path");
+// DEBUG: herhangi bir istekte değerleri döndür
+if (req.url && req.url.includes("__debug=1")) {
+  return sendJson(res, 200, {
+    debug: true,
+    reqUrl: req.url,
+    reqPath: incoming.pathname,
+    routedPath: routedPath,
+    queryParams: Object.fromEntries(incoming.searchParams),
+    method: req.method
+  });
+}
+if (routedPath === null) {
+  return sendJson(res, 400, {
+    ok: false,
+    function: "api/worker.js",
+    error: "Vercel yönlendirme yolu parametresi alınamadı.",
+    receivedPath: incoming.pathname
+  });
+}
     incoming.searchParams.delete("__vercel_route_path");
     let pathname = `/${String(routedPath).replace(/^\/+/, "")}`;
     // Önceki dağıtımlarla uyumluluk: dışarıdan /api/* istenirse iç rotaya çevir.
