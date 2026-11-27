@@ -1,10 +1,8 @@
 // auth.js — Kayıt/giriş/şifre sıfırlama + güvenlik + permissions döndürme.
 // Faz 3: CORS temizlendi + askıya alınmış kullanıcı oturumu engellendi.
 // Faz 6: /auth/recover/start ve /auth/recover/verify enumeration düzeltmesi
-//        - Kullanıcı yoksa deterministik fake sorular (ayırt edilemez)
-//        - Verify'da her hata için generic "Güvenlik cevapları eşleşmedi" mesajı
-//        - Verify'da IP rate limit (login_attempts tablosu paylaşılır)
 // Faz 7: Bearer admin token önceliği ve cookie oturumundan ayrıştırma.
+// Faz 8: İzin listeli CORS + credential desteği + tüm auth yanıtlarına CORS.
 
 const PBKDF2_ITER = 100000;
 const SESSION_TTL = 30 * 86400;
@@ -16,6 +14,30 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type,Authorization"
 };
+
+// Test, canlı HF ve Vercel alan adları açıkça izinlidir.
+const ALLOWED_ORIGINS = new Set([
+  // Canlı
+  "https://vefaeser-kestik.static.hf.space",
+  "https://film-proxy.vercel.app",
+
+  // Test
+  "https://vefaeser-kestiktest.static.hf.space",
+  "https://film-proxy-test.vercel.app"
+]);
+
+function corsHeaders(request) {
+  const origin = request?.headers.get("Origin") || "";
+  const headers = { ...CORS };
+
+  if (ALLOWED_ORIGINS.has(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+    headers["Access-Control-Allow-Credentials"] = "true";
+    headers["Vary"] = "Origin";
+  }
+
+  return headers;
+}
 
 function jsonRes(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
@@ -94,7 +116,8 @@ function getCookie(req, name) {
   return null;
 }
 
-// Tek Worker iki HF alan adına hizmet verir. Test ve canlı oturumları ayrıdır.
+// Tek Worker iki HF alan adına hizmet verir.
+// Test ve canlı oturumları ayrıdır.
 function sessionCookieName(env) {
   return env?.IS_TEST_ENV === true ? "sid_test" : "sid";
 }
@@ -112,7 +135,6 @@ function isValidEmail(s) {
 }
 
 // === FAZ 6: Deterministik fake sorular için sabit soru bankası ===
-// (app-defs.js'teki SECURITY_QUESTIONS ile aynı set, backend bağımsız)
 
 const SECURITY_QUESTIONS_BANK = [
   "favorite_movie",
@@ -131,7 +153,6 @@ const SECURITY_QUESTIONS_BANK = [
 ];
 
 function deterministicQuestions(login) {
-  // Aynı kullanıcı adı için her zaman aynı 3 soru döner (saldırgan ayırt edemez).
   let h = 0;
 
   for (let i = 0; i < login.length; i++) {
@@ -450,10 +471,8 @@ async function nextRegisterNumber(env) {
   return n;
 }
 
-// Faz 7 düzeltmesi:
 // Önce aktif yönetici aranır.
-// Aktif yönetici yoksa askıya alınmış olsa bile mevcut yönetici kaydı döndürülür.
-// Böylece askıya alınmış bir yönetici nedeniyle ikinci yönetici oluşturulmaz.
+// Aktif yönetici yoksa mevcut askıya alınmış yönetici döndürülür.
 // Yalnızca hiç yönetici kaydı yoksa ilk yönetici oluşturulur.
 async function ensureAdminUser(env) {
   if (!env.DB) return null;
@@ -517,7 +536,9 @@ async function ensureAdminUser(env) {
   }
 }
 
-export async function handleAuth(request, env, ctx) {
+// İç auth yönlendiricisi.
+// Yanıtların CORS başlıkları dış handleAuth sarmalayıcısında eklenir.
+async function handleAuthInternal(request, env, ctx) {
   if (request.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -791,7 +812,6 @@ export async function handleAuth(request, env, ctx) {
         });
       }
 
-      // Aynı yöneticiye ait geçerli cookie oturumu varsa yeniden oluşturma.
       const cookieToken = getCookie(request, sessionCookieName(env));
 
       const existingSession = cookieToken
@@ -897,8 +917,6 @@ export async function handleAuth(request, env, ctx) {
     const login = String(body.login || "").trim();
     const user = await findUserByLogin(env, login);
 
-    // Kullanıcı yoksa veya güvenlik sorusu tanımlamamışsa deterministik fake sorular.
-    // Aynı login için her zaman aynı 3 soru döner — saldırgan kullanıcı var mı yok mu ayırt edemez.
     if (!user) {
       return jsonRes({
         ok: true,
@@ -1177,6 +1195,23 @@ export async function handleAuth(request, env, ctx) {
   return jsonErr("Auth route bulunamadı", 404);
 }
 
+// Dış auth giriş noktası.
+// Bütün yanıtlar, durum kodundan bağımsız olarak CORS başlıklarıyla döner.
+export async function handleAuth(request, env, ctx) {
+  const response = await handleAuthInternal(request, env, ctx);
+  const headers = new Headers(response.headers);
+
+  for (const [key, value] of Object.entries(corsHeaders(request))) {
+    headers.set(key, value);
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
 export async function getCurrentUser(env, request) {
   const token = getCookie(request, sessionCookieName(env));
   return await getSession(env, token);
@@ -1226,4 +1261,4 @@ export async function getCurrentUserWithAdminBridge(env, request) {
   if (sess && sess.is_suspended) return null;
 
   return sess || null;
-    } 
+    }
