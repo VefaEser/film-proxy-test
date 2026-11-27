@@ -298,29 +298,101 @@ export async function handleAuth(request, env, ctx) {
   }
 
   if (path === "/me" && request.method === "GET") {
+    const auth = request.headers.get("Authorization") || "";
+
+    // Authorization başlığı açıkça gönderilmişse önce admin token'ı doğrula.
+    if (auth.startsWith("Bearer ")) {
+      const suppliedToken = auth.slice(7).trim();
+
+      if (
+        env.ADMIN_TOKEN &&
+        suppliedToken &&
+        timingSafeEqualStr(suppliedToken, env.ADMIN_TOKEN)
+      ) {
+        const admin = await ensureAdminUser(env);
+
+        if (!admin) {
+          return jsonRes({ ok: false, user: null, permissions: [] });
+        }
+
+        // Aynı admin oturumu zaten varsa yeniden session oluşturma.
+        const cookieToken = getCookie(request, sessionCookieName(env));
+        const existingSession = cookieToken
+          ? await getSession(env, cookieToken)
+          : null;
+
+        if (existingSession && existingSession.user_id === admin.id) {
+          const permissions = await fetchPermissions(env, admin.id);
+          return jsonRes({
+            ok: true,
+            userId: admin.id,
+            username: admin.username,
+            registerNumber: admin.register_number,
+            isAdmin: true,
+            isPublic: !!admin.is_public,
+            isApproved: true,
+            isEmailVerified: true,
+            permissions
+          });
+        }
+
+        const s = await createSession(env, admin.id, "", "admin-bridge");
+        return new Response(JSON.stringify({
+          ok: true,
+          userId: admin.id,
+          username: admin.username,
+          registerNumber: admin.register_number,
+          isAdmin: true,
+          isPublic: !!admin.is_public,
+          isApproved: true,
+          isEmailVerified: true,
+          permissions: [
+            "refresh_movie",
+            "edit_suggestions_approve",
+            "comment_approve",
+            "user_manage",
+            "field_unlock",
+            "csv_import_cards",
+            "view_private"
+          ]
+        }), {
+          status: 200,
+          headers: {
+            ...CORS,
+            "Content-Type": "application/json",
+            "Set-Cookie": sessionCookieHeader(s.token, SESSION_TTL, env)
+          }
+        });
+      }
+
+      // Açıkça gönderilmiş ama geçersiz bir Bearer token varsa
+      // normal kullanıcı çereziyle admin doğrulaması yapılmaz.
+      return jsonRes({ ok: false, user: null, permissions: [] });
+    }
+
+    // Admin token başlığı yoksa normal kullanıcı oturumunu kontrol et.
     const token = getCookie(request, sessionCookieName(env));
     const sess = await getSession(env, token);
+
     if (sess) {
-      if (sess.is_suspended) return jsonRes({ ok: false, user: null, permissions: [] });
+      if (sess.is_suspended) {
+        return jsonRes({ ok: false, user: null, permissions: [] });
+      }
+
       const permissions = await fetchPermissions(env, sess.user_id);
       return jsonRes({
-        ok: true, userId: sess.user_id, username: sess.username, registerNumber: sess.register_number,
-        isAdmin: !!sess.is_admin, isPublic: !!sess.is_public, isApproved: !!sess.is_approved, isEmailVerified: !!sess.is_email_verified,
+        ok: true,
+        userId: sess.user_id,
+        username: sess.username,
+        registerNumber: sess.register_number,
+        isAdmin: !!sess.is_admin,
+        isPublic: !!sess.is_public,
+        isApproved: !!sess.is_approved,
+        isEmailVerified: !!sess.is_email_verified,
         permissions
       });
     }
-    const auth = request.headers.get("Authorization") || "";
-    if (env.ADMIN_TOKEN && auth === `Bearer ${env.ADMIN_TOKEN}`) {
-      const admin = await ensureAdminUser(env);
-      if (admin) {
-        const s = await createSession(env, admin.id, "", "admin-bridge");
-        return new Response(JSON.stringify({
-          ok: true, userId: admin.id, username: admin.username, registerNumber: admin.register_number,
-          isAdmin: true, isPublic: !!admin.is_public, isApproved: true, isEmailVerified: true,
-          permissions: ["refresh_movie", "edit_suggestions_approve", "comment_approve", "user_manage", "field_unlock", "csv_import_cards", "view_private"]
-        }), { status: 200, headers: { ...CORS, "Content-Type": "application/json", "Set-Cookie": sessionCookieHeader(s.token, SESSION_TTL, env) } });
-      }
-    }
+
     return jsonRes({ ok: false, user: null, permissions: [] });
   }
 
