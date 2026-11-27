@@ -1,7 +1,14 @@
-// cors.js — Yalnızca test HF sitesi için merkezi CORS.
+// cors.js — Test/canlı HF ve Vercel siteleri için merkezi CORS.
 // Cookie tabanlı oturumlarda wildcard kullanılmaz.
+
 const ALLOWED_ORIGINS = new Set([
-  "https://vefaeser-kestiktest.static.hf.space"
+  // Canlı
+  "https://vefaeser-kestik.static.hf.space",
+  "https://film-proxy.vercel.app",
+
+  // Test
+  "https://vefaeser-kestiktest.static.hf.space",
+  "https://film-proxy-test.vercel.app"
 ]);
 
 const BASE_CORS_HEADERS = {
