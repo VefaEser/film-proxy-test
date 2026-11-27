@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { waitUntil } from "@vercel/functions";
-import worker from "../cloudflare-worker.js";
+import worker from "../index.js";
 import { createHash } from "node:crypto";
 
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
