@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import { waitUntil } from "@vercel/functions";
 import worker from "../index.js";
+import { createTursoAdapter as createNodeTursoAdapter } from "../turso-adapter-node.js";
 import { createHash } from "node:crypto";
 
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
@@ -94,6 +95,29 @@ export default async function handler(req, res) {
     else if (pathname.startsWith("/api/")) pathname = pathname.slice(4);
     const target = new URL(pathname + incoming.search, "https://worker.internal");
     if (pathname === "/image/thumbnail") return await serveThumbnail(req, res, incoming);
+
+    // Geçici yönlendirme tanısı: Worker/DB çağrısı yapmadan Vercel fonksiyonunu doğrular.
+    if (pathname === "/__echo") {
+      const echoCors = corsFor(req);
+      if (echoCors === null) {
+        return sendJson(res, 403, { ok: false, error: "Bu kaynağa izin verilmiyor." });
+      }
+      return sendJson(res, 200, {
+        ok: true,
+        runtime: "vercel-node",
+        nodeVersion: process.versions.node,
+        requestUrl: String(req.url || ""),
+        host: String(req.headers.host || ""),
+        incomingPathname: incoming.pathname,
+        forwardedPathname: pathname,
+        query: incoming.search,
+        apiPrefixStripped: incoming.pathname === "/api" || incoming.pathname.startsWith("/api/"),
+        hasTestDbUrl: Boolean(process.env.TEST_TURSO_DATABASE_URL),
+        hasTestDbToken: Boolean(process.env.TEST_TURSO_AUTH_TOKEN),
+        hasAdminToken: Boolean(process.env.ADMIN_TOKEN)
+      }, echoCors);
+    }
+
     const body = await readBody(req);
     const headers = new Headers();
     for (const [key, value] of Object.entries(req.headers || {})) {
@@ -108,12 +132,24 @@ export default async function handler(req, res) {
     });
     const ctx = { waitUntil(promise) { waitUntil(Promise.resolve(promise)); } };
     const env = { ...process.env, IS_TEST_ENV: "true" };
+
     console.info("[vercel-env-check]", {
-  processUrlPresent: Boolean(process.env.TEST_TURSO_DATABASE_URL),
-  processTokenPresent: Boolean(process.env.TEST_TURSO_AUTH_TOKEN),
-  forwardedUrlPresent: Boolean(env.TEST_TURSO_DATABASE_URL),
-  forwardedTokenPresent: Boolean(env.TEST_TURSO_AUTH_TOKEN)
-});
+      processUrlPresent: Boolean(process.env.TEST_TURSO_DATABASE_URL),
+      processTokenPresent: Boolean(process.env.TEST_TURSO_AUTH_TOKEN),
+      adminTokenPresent: Boolean(process.env.ADMIN_TOKEN),
+      runtime: "node",
+      dbAdapter: "@libsql/client/node"
+    });
+
+    // Node.js Function kendi Node adaptörünü enjekte eder.
+    // Eksik test bilgileri canlı DB'ye geçişe neden olmaz.
+    try {
+      env.DB = createNodeTursoAdapter(env, true);
+    } catch (error) {
+      env.DB = null;
+      console.error("[vercel-turso-adapter-init]", error?.stack || error);
+    }
+
     const response = await worker.fetch(request, env, ctx);
     res.statusCode = response.status;
     response.headers.forEach((value, key) => res.setHeader(key, value));
