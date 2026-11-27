@@ -4,6 +4,7 @@
 //        - Kullanıcı yoksa deterministik fake sorular (ayırt edilemez)
 //        - Verify'da her hata için generic "Güvenlik cevapları eşleşmedi" mesajı
 //        - Verify'da IP rate limit (login_attempts tablosu paylaşılır)
+// Faz 7: Bearer admin token önceliği ve cookie oturumundan ayrıştırma.
 const PBKDF2_ITER = 100000;
 const SESSION_TTL = 30 * 86400;
 const RECOVER_TTL = 900;
@@ -209,8 +210,7 @@ async function ensureAdminUser(env) {
     const id = result.meta.last_row_id;
     return await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(id).first();
   } catch (e) { console.warn("ensureAdminUser:", e.message); return null; }
-}
-
+  }
 export async function handleAuth(request, env, ctx) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   const url = new URL(request.url);
@@ -300,44 +300,38 @@ export async function handleAuth(request, env, ctx) {
   if (path === "/me" && request.method === "GET") {
     const auth = request.headers.get("Authorization") || "";
 
-    // Authorization başlığı açıkça gönderilmişse önce admin token'ı doğrula.
-    if (auth.startsWith("Bearer ")) {
-      const suppliedToken = auth.slice(7).trim();
+    // Bearer başlığı varsa önce doğrula; cookie oturumu bunu gölgeleyemez.
+    if (/^Bearer\s+/i.test(auth)) {
+      const suppliedToken = auth.replace(/^Bearer\s+/i, "").trim();
 
       if (
-        env.ADMIN_TOKEN &&
-        suppliedToken &&
-        timingSafeEqualStr(suppliedToken, env.ADMIN_TOKEN)
+        !env.ADMIN_TOKEN ||
+        !suppliedToken ||
+        !timingSafeEqualStr(suppliedToken, env.ADMIN_TOKEN)
       ) {
-        const admin = await ensureAdminUser(env);
+        return jsonRes({ ok: false, user: null, permissions: [] });
+      }
 
-        if (!admin) {
-          return jsonRes({ ok: false, user: null, permissions: [] });
-        }
+      const admin = await ensureAdminUser(env);
 
-        // Aynı admin oturumu zaten varsa yeniden session oluşturma.
-        const cookieToken = getCookie(request, sessionCookieName(env));
-        const existingSession = cookieToken
-          ? await getSession(env, cookieToken)
-          : null;
+      if (!admin || !admin.is_admin || admin.is_suspended) {
+        return jsonRes({ ok: false, user: null, permissions: [] });
+      }
 
-        if (existingSession && existingSession.user_id === admin.id) {
-          const permissions = await fetchPermissions(env, admin.id);
-          return jsonRes({
-            ok: true,
-            userId: admin.id,
-            username: admin.username,
-            registerNumber: admin.register_number,
-            isAdmin: true,
-            isPublic: !!admin.is_public,
-            isApproved: true,
-            isEmailVerified: true,
-            permissions
-          });
-        }
+      // Aynı yöneticiye ait geçerli cookie oturumu varsa yeniden oluşturma.
+      const cookieToken = getCookie(request, sessionCookieName(env));
+      const existingSession = cookieToken
+        ? await getSession(env, cookieToken)
+        : null;
 
-        const s = await createSession(env, admin.id, "", "admin-bridge");
-        return new Response(JSON.stringify({
+      if (
+        existingSession &&
+        existingSession.user_id === admin.id &&
+        existingSession.is_admin &&
+        !existingSession.is_suspended
+      ) {
+        const permissions = await fetchPermissions(env, admin.id);
+        return jsonRes({
           ok: true,
           userId: admin.id,
           username: admin.username,
@@ -346,31 +340,40 @@ export async function handleAuth(request, env, ctx) {
           isPublic: !!admin.is_public,
           isApproved: true,
           isEmailVerified: true,
-          permissions: [
-            "refresh_movie",
-            "edit_suggestions_approve",
-            "comment_approve",
-            "user_manage",
-            "field_unlock",
-            "csv_import_cards",
-            "view_private"
-          ]
-        }), {
-          status: 200,
-          headers: {
-            ...CORS,
-            "Content-Type": "application/json",
-            "Set-Cookie": sessionCookieHeader(s.token, SESSION_TTL, env)
-          }
+          permissions
         });
       }
 
-      // Açıkça gönderilmiş ama geçersiz bir Bearer token varsa
-      // normal kullanıcı çereziyle admin doğrulaması yapılmaz.
-      return jsonRes({ ok: false, user: null, permissions: [] });
+      const s = await createSession(env, admin.id, "", "admin-bridge");
+      return new Response(JSON.stringify({
+        ok: true,
+        userId: admin.id,
+        username: admin.username,
+        registerNumber: admin.register_number,
+        isAdmin: true,
+        isPublic: !!admin.is_public,
+        isApproved: true,
+        isEmailVerified: true,
+        permissions: [
+          "refresh_movie",
+          "edit_suggestions_approve",
+          "comment_approve",
+          "user_manage",
+          "field_unlock",
+          "csv_import_cards",
+          "view_private"
+        ]
+      }), {
+        status: 200,
+        headers: {
+          ...CORS,
+          "Content-Type": "application/json",
+          "Set-Cookie": sessionCookieHeader(s.token, SESSION_TTL, env)
+        }
+      });
     }
 
-    // Admin token başlığı yoksa normal kullanıcı oturumunu kontrol et.
+    // Bearer başlığı yoksa normal kullanıcı cookie oturumunu kontrol et.
     const token = getCookie(request, sessionCookieName(env));
     const sess = await getSession(env, token);
 
@@ -394,9 +397,8 @@ export async function handleAuth(request, env, ctx) {
     }
 
     return jsonRes({ ok: false, user: null, permissions: [] });
-  }
-
-  // === FAZ 6: /recover/start — enumeration önleme ===
+}
+    // === FAZ 6: /recover/start — enumeration önleme ===
   if (path === "/recover/start" && request.method === "POST") {
     let body; try { body = await request.json(); } catch { return jsonErr("Geçersiz JSON", 400); }
     const login = String(body.login || "").trim();
@@ -501,14 +503,49 @@ export async function getCurrentUser(env, request) {
   const token = getCookie(request, sessionCookieName(env));
   return await getSession(env, token);
 }
+
 export async function getCurrentUserWithAdminBridge(env, request) {
-  const sess = await getCurrentUser(env, request);
-  if (sess && sess.is_suspended) return null;
-  if (sess) return sess;
   const auth = request.headers.get("Authorization") || "";
-  if (env.ADMIN_TOKEN && auth === `Bearer ${env.ADMIN_TOKEN}`) {
-    const admin = await ensureAdminUser(env);
-    if (admin) return { user_id: admin.id, username: admin.username, is_admin: 1, is_public: admin.is_public, register_number: admin.register_number, is_approved: 1, is_email_verified: 1 };
-  }
-  return null;
+
+  // Bearer başlığı açıkça gönderilmişse önce onu doğrula.
+  // Geçersiz Bearer token durumunda cookie oturumuna geri dönme.
+  if (/^Bearer\s+/i.test(auth)) {
+    const suppliedToken = auth.replace(/^Bearer\s+/i, "").trim();
+
+    if (
+      !env.ADMIN_TOKEN ||
+      !suppliedToken ||
+      !timingSafeEqualStr(suppliedToken, env.ADMIN_TOKEN)
+    ) {
+      return null;
     }
+
+    const admin = await ensureAdminUser(env);
+
+    if (
+      !admin ||
+      !admin.is_admin ||
+      admin.is_suspended
+    ) {
+      return null;
+    }
+
+    return {
+      user_id: admin.id,
+      username: admin.username,
+      is_admin: 1,
+      is_suspended: 0,
+      is_public: admin.is_public,
+      register_number: admin.register_number,
+      is_approved: 1,
+      is_email_verified: 1
+    };
+  }
+
+  // Bearer başlığı yoksa normal cookie oturumunu kullan.
+  const sess = await getCurrentUser(env, request);
+
+  if (sess && sess.is_suspended) return null;
+
+  return sess || null;
+}
