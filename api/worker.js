@@ -90,15 +90,21 @@ export default async function handler(req, res) {
   try {
     const incoming = new URL(req.url || "/", `https://${req.headers.host || "vercel.local"}`);
 
-    // vercel.json, tüm genel yolları bu tek ve sabit Node.js Function'a
-    // yönlendirir. Vercel, kaynak desenindeki :routePath* parametresini
-    // hedef URL'nin query bölümüne otomatik ekler.
-    const routedPath = incoming.searchParams.get("__vercel_route_path") || "";
-    incoming.searchParams.delete("__vercel_route_path");
-    let pathname = routedPath ? `/${routedPath.replace(/^\/+/, "")}` : "/";
-    if (pathname === "/api/worker" || pathname.startsWith("/api/worker/")) {
-      pathname = pathname.slice("/api/worker".length) || "/";
+    // vercel.json, her genel URL'yi bu sabit Node.js Function'a yönlendirir.
+    // Wildcard parametresi destination query'sine açıkça aktarılır.
+    // Parametre yoksa sessizce "/" yoluna düşmek yerine yönlendirme hatasını görünür kıl.
+    const routedPath = incoming.searchParams.get("__vercel_route_path");
+    if (routedPath === null) {
+      return sendJson(res, 400, {
+        ok: false,
+        function: "api/worker.js",
+        error: "Vercel yönlendirme yolu parametresi alınamadı.",
+        receivedPath: incoming.pathname
+      });
     }
+    incoming.searchParams.delete("__vercel_route_path");
+    let pathname = `/${String(routedPath).replace(/^\/+/, "")}`;
+    // Önceki dağıtımlarla uyumluluk: dışarıdan /api/* istenirse iç rotaya çevir.
     if (pathname === "/api") pathname = "/";
     else if (pathname.startsWith("/api/")) pathname = pathname.slice(4);
     const target = new URL(pathname + incoming.search, "https://worker.internal");
