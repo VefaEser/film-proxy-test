@@ -198,9 +198,13 @@ export async function handleAdmin(request, env, ctx) {
   const path = url.pathname.replace(/^\/admin/, "");
   const now = () => Math.floor(Date.now() / 1000);
   try {
-    const sess = await requireAdmin(env, request);
+const sess = await requireAdmin(env, request);
 
-    if (path === "/users" && request.method === "GET") {
+if (path === "/ping" && request.method === "GET") {
+  return jsonRes({ ok: true, via: "bearer", user_id: sess.user_id, username: sess.username, is_admin: !!sess.is_admin });
+}
+
+if (path === "/users" && request.method === "GET") {
       const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
       const requestedPageSize = parseInt(url.searchParams.get("pageSize") || "10", 10);
       const pageSize = Number.isFinite(requestedPageSize)
