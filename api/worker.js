@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { waitUntil } from "@vercel/functions";
-import worker from "../index.js";
+import worker from "../cloudflare-worker.js";
 import { createHash } from "node:crypto";
 
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
@@ -281,7 +281,7 @@ export default async function handler(req, res) {
       `https://${req.headers.host || "vercel.local"}`
     );
 
-    // Vercel rewrite tarafından iletilen özgün yolu al.
+    // Vercel rewrite tarafından aktarılan özgün yolu al.
     const forwardedPath = incoming.searchParams.get(
       "__vercel_route_path"
     );
@@ -293,10 +293,8 @@ export default async function handler(req, res) {
         ? forwardedPath
         : `/${forwardedPath}`;
 
-      // Dahili yönlendirme parametresini uygulama sorgusundan çıkar.
       incoming.searchParams.delete("__vercel_route_path");
     } else {
-      // Doğrudan /api/worker çağrıları için geriye dönük uyumluluk.
       pathname = incoming.pathname.replace(
         /^\/api\/worker/,
         ""
@@ -314,7 +312,7 @@ export default async function handler(req, res) {
       "https://worker.internal"
     );
 
-    // Yönlendirme zincirini DB/API'den bağımsız doğrula.
+    // Yönlendirmeyi veritabanından bağımsız doğrulama.
     if (
       pathname === "/__vercel-route-check" &&
       req.method === "GET"
@@ -362,7 +360,7 @@ export default async function handler(req, res) {
       }
     };
 
-    // Vercel ortam değişkenlerini Worker ortamına aktar.
+    // Vercel ortam değişkenlerini test Worker ortamına aktar.
     const env = {
       ...process.env,
       IS_TEST_ENV: "true"
@@ -431,4 +429,4 @@ export default async function handler(req, res) {
       res.destroy(error);
     }
   }
-    }
+      }
