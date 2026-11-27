@@ -108,6 +108,12 @@ export default async function handler(req, res) {
     });
     const ctx = { waitUntil(promise) { waitUntil(Promise.resolve(promise)); } };
     const env = { ...process.env, IS_TEST_ENV: "true" };
+    console.info("[vercel-env-check]", {
+  processUrlPresent: Boolean(process.env.TEST_TURSO_DATABASE_URL),
+  processTokenPresent: Boolean(process.env.TEST_TURSO_AUTH_TOKEN),
+  forwardedUrlPresent: Boolean(env.TEST_TURSO_DATABASE_URL),
+  forwardedTokenPresent: Boolean(env.TEST_TURSO_AUTH_TOKEN)
+});
     const response = await worker.fetch(request, env, ctx);
     res.statusCode = response.status;
     response.headers.forEach((value, key) => res.setHeader(key, value));
