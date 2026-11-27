@@ -7,7 +7,7 @@ Sistem; kullanıcı arayüzü, backend, harici veri kaynakları, yapay zekâ ser
 
 Bu mimarinin temel amacı, kullanıcı arayüzünü sunucu işlemlerinden ayırmak, gizli anahtarları güvenli biçimde korumak, veri kaynaklarını birbirinden bağımsız kullanabilmek ve yapılan değişiklikleri canlı sisteme aktarmadan önce test edebilmektir.
 
----
+-----
 
 # 1. Genel sistem mimarisi
 
