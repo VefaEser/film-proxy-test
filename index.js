@@ -153,19 +153,9 @@ async function handleRequest(request, env, ctx) {
     if (!secret || supplied !== `Bearer ${secret}`) return jsonError("Yetkisiz.", 401);
     if (!env.DB) return jsonError("Test veritabanına bağlanılamadı.", 503);
     try {
-      const result = await processAdminTaskQueue(env, 1);
-      // Bir öğe işlendi ise yeni bir Vercel Function çağrısı başlat.
-      // Her çağrı kendi 300 saniyelik süresini kullanır; öğeler Turso'da kalıcıdır.
-      if (result.processed >= 1 && typeof ctx?.waitUntil === "function") {
-        const nextUrl = new URL("/internal/run-admin-tasks", request.url);
-        const continuation = fetch(nextUrl, {
-          method: "POST",
-          headers: { "Authorization": `Bearer ${secret}` }
-        }).then(response => {
-          if (!response.ok) throw new Error(`Görev devam çağrısı HTTP ${response.status}`);
-        }).catch(error => console.error("[admin-task-continuation]", error?.stack || error));
-        ctx.waitUntil(continuation);
-      }
+      // Her çağrıda tek öğe işlenir; sonraki çağrıyı Cloudflare Cron
+      // dakikada bir tetikler. Böylece Vercel içinde sınırsız self-fetch zinciri yoktur.
+      const result = await processAdminTaskQueue(env, 5);
       return response({ ok: true, ...result, environment: "test" });
     } catch (error) {
       console.error("[admin-task-runner]", error?.stack || error);
@@ -487,16 +477,31 @@ try {
   },
 
   async scheduled(controller, env, ctx) {
-    // Bu Worker yalnızca TEST Turso dalını kullanır.
-    const appEnv = Object.assign({}, env, { IS_TEST_ENV: true });
-    try {
-      appEnv.DB = createTursoAdapter(env, true);
-      const result = await processAdminTaskQueue(appEnv, 1);
-      console.log("[admin-task-queue]", JSON.stringify(result));
-      return result;
-    } catch (error) {
-      console.error("[admin-task-queue-scheduled]", error?.stack || error);
-      throw error;
+    // Test Worker yalnızca görev tetikleyicisidir; veritabanı işlemlerini Vercel yapar.
+    const target = String(env.VERCEL_TASK_RUNNER_URL || "").trim();
+    const secret = String(env.TASK_RUNNER_SECRET || "").trim();
+    if (!target || !secret) {
+      console.error("[admin-task-scheduler] VERCEL_TASK_RUNNER_URL veya TASK_RUNNER_SECRET eksik.");
+      return;
     }
+    let targetUrl;
+    try { targetUrl = new URL(target); }
+    catch { throw new Error("VERCEL_TASK_RUNNER_URL geçerli bir URL değil."); }
+    if (targetUrl.protocol !== "https:") {
+      throw new Error("Görev çalıştırıcı adresi HTTPS olmalı.");
+    }
+    const result = await fetch(targetUrl.href, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${secret}`,
+        "Content-Type": "application/json"
+      },
+      body: "{}"
+    });
+    if (!result.ok) {
+      const detail = (await result.text()).slice(0, 500);
+      throw new Error(`Vercel görev uç noktası HTTP ${result.status}: ${detail}`);
+    }
+    console.log("[admin-task-scheduler] Vercel tetiklendi.");
   }
 }; 
