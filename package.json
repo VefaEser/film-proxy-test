@@ -2,10 +2,13 @@
   "name": "film-proxy-test-vercel",
   "private": true,
   "type": "module",
+  "main": "api/worker.js",
   "dependencies": {
     "@libsql/client": "^0.18.0",
     "@vercel/functions": "^2.0.0",
     "sharp": "^0.34.5"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  }
 }
