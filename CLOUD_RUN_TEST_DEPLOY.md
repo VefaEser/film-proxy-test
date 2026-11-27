@@ -60,4 +60,4 @@ Scheduler'ın cron sıklığı mevcut test davranışıyla uyumlu olacak şekild
 5. Ancak tüm kontrollerden sonra frontend `API_BASE` değerini Cloud Run test URL'sine çevirin.
 6. Eski test Worker'ı doğrulama bitene kadar silmeyin.
 
-Bu belge dağıtım yapıldığı anlamına gelmez. Bu çalışma sırasında Google Cloud'a, Turso'ya, GitHub'a veya Hugging Face'e bağlantı/dağıtım yapılmamıştır.
+Bu belge dağıtım yapıldığı anlamına gelmez. Bu çalışma sırasında Google Cloud'a, Turso'ya, GitHub'a veya Hugging Face'e bağlantı/dağıtım yapılmamıştır...
