@@ -3,12 +3,12 @@
   "rewrites": [
     {
       "source": "/:__vercel_route_path*",
-      "destination": "/api/worker"
+      "destination": "/api/worker?__vercel_route_path=:__vercel_route_path*"
     }
   ],
   "functions": {
     "api/worker.js": {
-      "maxDuration": 300
+      "maxDuration": 60
     }
   }
 }
