@@ -446,6 +446,12 @@ export default {
 // Bu Worker yalnızca test ortamında çalışır.
 // Origin başlığından bağımsız olarak daima test veritabanını kullanır.
 const appEnv = Object.assign({}, env, { IS_TEST_ENV: true });
+    console.info("[worker-env-check]", {
+  urlPresent: Boolean(env?.TEST_TURSO_DATABASE_URL),
+  tokenPresent: Boolean(env?.TEST_TURSO_AUTH_TOKEN),
+  urlType: typeof env?.TEST_TURSO_DATABASE_URL,
+  tokenType: typeof env?.TEST_TURSO_AUTH_TOKEN
+});
 
 try {
   // Yalnızca TEST_TURSO_DATABASE_URL ve TEST_TURSO_AUTH_TOKEN kullanılır.
