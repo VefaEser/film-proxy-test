@@ -79,7 +79,7 @@ sonuçların aktarılması
 
 Bu şema sistemin işlevsel bileşenlerini gösterir. Gerçek isteklerin hangi servis üzerinden geçtiği, ilgili API uç noktasının yapılandırmasına bağlıdır.
 
----
+-----
 
 # 2. Hugging Face – Kullanıcı arayüzü
 
