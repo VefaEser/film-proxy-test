@@ -2,8 +2,8 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
-      "source": "/:__vercel_route_path*",
-      "destination": "/api/worker?__vercel_route_path=:__vercel_route_path*"
+      "source": "/(.*)",
+      "destination": "/api/worker?__vercel_route_path=/$1"
     }
   ],
   "functions": {
