@@ -1,3 +1,4 @@
+
 // index.js — Faz G: /admin/d1-diag anlık teşhis endpoint'i eklendi
 // Yeni /movie/rating-* ve /admin/user-* route'ları handleUser'a yönlendirildi
 // Faz 6: /admin/config GET → auth varsa tüm config, yoksa sadece filter_info.*
@@ -274,9 +275,8 @@ async function handleRequest(request, env, ctx) {
     return await handleSocial(request, env, ctx);
   }
 
-  if (_u.pathname === "/admin/ping") {
-    return await handleAdmin(request, env, ctx);
-  }
+  // /admin/ping burada handleAdmin'a yönlendirilmez.
+  // Ana yönlendiricideki requireAdminEither() doğrulamasına ulaşmalıdır.
 
   if (
     _u.pathname.startsWith("/admin/bulk/") ||
@@ -430,6 +430,7 @@ async function handleRequest(request, env, ctx) {
       return response({ lists: obj });
     }
 
+    // /admin/ping için hem Bearer token hem yönetici oturumu doğrulanır.
     if (url.pathname === "/admin/ping" && request.method === "GET") {
       const auth = await requireAdminEither(env, request);
       if (!auth) return jsonError("Yetkisiz.", 401);
