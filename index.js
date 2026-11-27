@@ -188,6 +188,7 @@ async function handleRequest(request, env, ctx) {
     return await handleUser(request, env, ctx);
   }
   if (_u.pathname.startsWith("/social/")) return await handleSocial(request, env, ctx);
+  if (_u.pathname === "/admin/ping") return await handleAdmin(request, env, ctx);
   if (_u.pathname.startsWith("/admin/bulk/") ||
       _u.pathname.startsWith("/admin/users") || _u.pathname.startsWith("/admin/comments") ||
       _u.pathname.startsWith("/admin/locks") || _u.pathname.startsWith("/admin/suggestions") ||
