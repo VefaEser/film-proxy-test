@@ -91,34 +91,13 @@ export default async function handler(req, res) {
     const incoming = new URL(req.url || "/", `https://${req.headers.host || "vercel.local"}`);
 
     // vercel.json, her genel URL'yi bu sabit Node.js Function'a yönlendirir.
-    // Wildcard parametresi destination query'sine açıkça aktarılır.
-    // Parametre yoksa sessizce "/" yoluna düşmek yerine yönlendirme hatasını görünür kıl.
-const routedPath = incoming.searchParams.get("__vercel_route_path");
-// DEBUG: herhangi bir istekte değerleri döndür
-if (req.url && req.url.includes("__debug=1")) {
-  return sendJson(res, 200, {
-    debug: true,
-    reqUrl: req.url,
-    reqPath: incoming.pathname,
-    routedPath: routedPath,
-    queryParams: Object.fromEntries(incoming.searchParams),
-    method: req.method
-  });
-}
-if (routedPath === null) {
-  return sendJson(res, 400, {
-    ok: false,
-    function: "api/worker.js",
-    error: "Vercel yönlendirme yolu parametresi alınamadı.",
-    receivedPath: incoming.pathname
-  });
-}
-    incoming.searchParams.delete("__vercel_route_path");
-    let pathname = `/${String(routedPath).replace(/^\/+/, "")}`;
-    // Önceki dağıtımlarla uyumluluk: dışarıdan /api/* istenirse iç rotaya çevir.
-    if (pathname === "/api") pathname = "/";
-    else if (pathname.startsWith("/api/")) pathname = pathname.slice(4);
-    const target = new URL(pathname + incoming.search, "https://worker.internal");
+// Path forwarding: vercel.json, /X isteğini /api/worker/X adresine yönlendirir.
+// Burada /api/worker ön ekini kaldırıp iç rotayı elde ediyoruz.
+let pathname = incoming.pathname.replace(/^\/api\/worker/, "") || "/";
+// Geriye dönük uyumluluk: dışarıdan /api/* gelirse iç rotaya çevir.
+if (pathname === "/api") pathname = "/";
+else if (pathname.startsWith("/api/")) pathname = pathname.slice(4);
+const target = new URL(pathname + incoming.search, "https://worker.internal");
 
     // Dağıtım sonrası yönlendirme zincirini DB/API'den bağımsız doğrulamak için.
     if (pathname === "/__vercel-route-check" && req.method === "GET") {
