@@ -366,20 +366,14 @@ export default async function handler(req, res) {
       IS_TEST_ENV: "true"
     };
 
-    console.info("[vercel-env-check]", {
-      processUrlPresent: Boolean(
-        process.env.TEST_TURSO_DATABASE_URL
-      ),
-      processTokenPresent: Boolean(
-        process.env.TEST_TURSO_AUTH_TOKEN
-      ),
-      forwardedUrlPresent: Boolean(
-        env.TEST_TURSO_DATABASE_URL
-      ),
-      forwardedTokenPresent: Boolean(
-        env.TEST_TURSO_AUTH_TOKEN
-      )
-    });
+console.info("[vercel-env-check]", {
+  processUrlPresent: Boolean(process.env.TEST_TURSO_DATABASE_URL),
+  processTokenPresent: Boolean(process.env.TEST_TURSO_AUTH_TOKEN),
+  adminTokenPresent: Boolean(process.env.ADMIN_TOKEN),
+  forwardedUrlPresent: Boolean(env.TEST_TURSO_DATABASE_URL),
+  forwardedTokenPresent: Boolean(env.TEST_TURSO_AUTH_TOKEN),
+  forwardedAdminTokenPresent: Boolean(env.ADMIN_TOKEN)
+});
 
     const response = await worker.fetch(request, env, ctx);
 
