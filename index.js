@@ -2,7 +2,6 @@
 // Yeni /movie/rating-* ve /admin/user-* route'ları handleUser'a yönlendirildi
 // Faz 6: /admin/config GET → auth varsa tüm config, yoksa sadece filter_info.*
 import { corsHeaders } from "./cors.js";
-import { createTursoAdapter } from "./turso-adapter.js";
 import { handleAuth, getCurrentUserWithAdminBridge } from "./auth.js";
 import { handleUser } from "./users.js";
 import { handleSocial } from "./social.js";
@@ -453,13 +452,19 @@ const appEnv = Object.assign({}, env, { IS_TEST_ENV: true });
   tokenType: typeof env?.TEST_TURSO_AUTH_TOKEN
 });
 
-try {
-  // Yalnızca TEST_TURSO_DATABASE_URL ve TEST_TURSO_AUTH_TOKEN kullanılır.
-  // Test bilgileri eksikse canlı veritabanına geçiş yapılmaz.
-  appEnv.DB = createTursoAdapter(env, true);
-} catch (e) {
-  appEnv.DB = null;
-  console.error("[turso-adapter-init] TEST DB", e?.stack || e);
+if (!Object.prototype.hasOwnProperty.call(env || {}, "DB")) {
+  try {
+    // Cloudflare Worker için yalnızca web istemcisi kullanılır.
+    // Node/Vercel/Cloud Run DB adaptörünü kendi giriş dosyası enjekte eder.
+    const { createTursoAdapter } = await import("./turso-adapter.js");
+    appEnv.DB = createTursoAdapter(env, true);
+  } catch (e) {
+    appEnv.DB = null;
+    console.error("[turso-adapter-init] TEST DB", e?.stack || e);
+  }
+} else {
+  // Node giriş noktalarının enjekte ettiği DB nesnesini koru.
+  appEnv.DB = env.DB;
 }
 
     try {

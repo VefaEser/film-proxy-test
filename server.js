@@ -3,6 +3,7 @@ import { once } from "node:events";
 import sharp from "sharp";
 import { createHash } from "node:crypto";
 import worker from "./index.js";
+import { createTursoAdapter as createNodeTursoAdapter } from "./turso-adapter-node.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const MAX_BODY_BYTES = Number(process.env.MAX_HTTP_BODY_BYTES || 20 * 1024 * 1024);
@@ -87,6 +88,12 @@ async function serveThumbnail(req, res, url) {
 // Canlı Turso değişkenleri bulunsa bile DB adaptörü index.js içinde
 // TEST_TURSO_DATABASE_URL / TEST_TURSO_AUTH_TOKEN ile oluşturulur.
 const env = { ...process.env, IS_TEST_ENV: "true" };
+try {
+  env.DB = createNodeTursoAdapter(env, true);
+} catch (error) {
+  env.DB = null;
+  console.error("[node-turso-adapter-init] TEST DB", error?.stack || error);
+}
 
 function track(promise) {
   const task = Promise.resolve(promise);

@@ -3,7 +3,9 @@
 This change adds a Vercel Node.js Function entry point for the existing V5.5 Worker application.
 
 ## Files
-- `api/[...path].js`: catch-all Node.js function; rewrites `/...` to `/api/...`, restores the original path, invokes the existing Worker `fetch()` handler, connects `waitUntil`, and uses the existing `sharp` dependency for `/image/thumbnail`.
+- `api/[...path].js`: catch-all Node.js function; rewrites `/...` to `/api/...`, strips the internal `/api` prefix, invokes the existing Worker `fetch()` handler, connects `waitUntil`, and uses the existing `sharp` dependency for `/image/thumbnail`.
+- Vercel/Node uses `@libsql/client/node`; Cloudflare Worker uses `@libsql/client/web`. Both share `turso-adapter-core.js` so SQL result normalization stays identical.
+- Temporary `GET /__echo` reports the request URL/path as seen by the Vercel function, without calling the Worker or database. Remove this diagnostic route after routing is verified.
 - `vercel.json`: routes all public paths through the catch-all function and sets a 300-second maximum function duration.
 - `package.json`: adds `@vercel/functions` for Vercel's `waitUntil()` helper.
 

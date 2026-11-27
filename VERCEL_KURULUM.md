@@ -3,7 +3,8 @@
 Bu paket yalnızca TEST ortamı içindir. Canlı `film-proxy` projesine yüklemeyin.
 
 ## Mimari notu
-- HF ön yüzündeki `API_BASE` bu pakette değiştirilmedi; normal film/API istekleri şimdilik mevcut test Cloudflare Worker üzerinden devam eder. Vercel bu aşamada yalnızca arka plan görev kuyruğunu çalıştırmak için kullanılır. Böylece ön yüzü ve CORS ayarlarını aynı anda değiştirmiyoruz.
+- Bu arşivdeki HF test ön yüzünde `API_BASE`, `https://film-proxy-test.vercel.app` olarak ayarlıdır. Normal film/API istekleri ve admin oturumu Vercel `api/[...path].js` fonksiyonundan geçer.
+- Vercel Node.js fonksiyonu `@libsql/client/node` adaptörünü kullanır. Cloudflare test Worker ise kendi Worker girişinde `@libsql/client/web` adaptörünü kullanır. İki ortam da yalnızca `TEST_TURSO_DATABASE_URL` ve `TEST_TURSO_AUTH_TOKEN` değerlerini kullanır.
 - Test Cloudflare Worker Cron, dakikada bir Vercel üzerindeki gizli görev uç noktasını çağırır.
 
 ## İçerik ve sınırlar
