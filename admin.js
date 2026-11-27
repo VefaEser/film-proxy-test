@@ -80,6 +80,19 @@ function hashListSnapshot(rows) {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+function triggerAdminTaskRunner(request, env, ctx) {
+  const secret = String(env.TASK_RUNNER_SECRET || "");
+  if (!secret || typeof ctx?.waitUntil !== "function") return;
+  const target = new URL("/internal/run-admin-tasks", request.url);
+  const kickoff = fetch(target, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${secret}` }
+  }).then(response => {
+    if (!response.ok) throw new Error(`Görev başlatma HTTP ${response.status}`);
+  }).catch(error => console.error("[admin-task-kickoff]", error?.stack || error));
+  ctx.waitUntil(kickoff);
+}
+
 function permissionForTask(task) {
   if (task?.task_type === "delete_list") {
     try {
@@ -858,10 +871,11 @@ if (path === "/bulk/run" && request.method === "POST") {
         WHERE id=? AND status IN ('pending','running')
     `).bind(now(), taskId).run();
 
+    triggerAdminTaskRunner(request, env, ctx);
     return jsonRes({
         ok: true,
         taskId,
-        message: "Görev kalıcı kuyruğa alındı. Worker zamanlayıcısı öğeleri sürdürecek."
+        message: "Görev kalıcı kuyruğa alındı. Sunucu görevleri otomatik olarak sürdürecek."
     });
 }
 
@@ -917,6 +931,7 @@ if (path === "/bulk/task/resume" && request.method === "POST") {
         WHERE id=? AND status IN ('failed','running','pending')
     `).bind(now(), taskId).run();
 
+    triggerAdminTaskRunner(request, env, ctx);
     return jsonRes({ ok: true, taskId, status: "running" });
 }
 

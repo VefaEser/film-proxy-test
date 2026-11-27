@@ -50,35 +50,42 @@ async function handleThumbnailRequest(request) {
   let sourceUrl;
   try { sourceUrl = new URL(source); } catch { return thumbnailError("Geçersiz görsel adresi.", 400); }
   if (sourceUrl.protocol !== "https:" || !isAllowedThumbnailHost(sourceUrl.hostname)) {
-    return thumbnailError("Görsel kaynağı izinli değil.", 403, {
-      diagnostic: { sourceHost: sourceUrl.hostname, protocol: sourceUrl.protocol, reason: "host_or_protocol_not_allowed" }
-    });
+    return thumbnailError("Görsel kaynağı izinli değil.", 403);
   }
 
+  // Her denemede gerçek dönüştürülmüş gövde ölçülür. Sınır aşılırsa
+  // daha küçük/düşük kaliteli varyant denenir; orijinal asla sunulmaz.
   const variants = [
-    { width: 480, quality: 42 }, { width: 360, quality: 36 },
-    { width: 280, quality: 30 }, { width: 220, quality: 25 },
-    { width: 170, quality: 21 }, { width: 128, quality: 18 },
+    { width: 480, quality: 42 },
+    { width: 360, quality: 36 },
+    { width: 280, quality: 30 },
+    { width: 220, quality: 25 },
+    { width: 170, quality: 21 },
+    { width: 128, quality: 18 },
     { width: 96, quality: 15 }
   ];
-  const attempts = [];
+
   for (const variant of variants) {
     let currentUrl = new URL(sourceUrl.href);
     let transformed = null;
     try {
+      // Yönlendirmeler manuel izlenir; her hedef yeniden host allowlist
+      // kontrolünden geçer. Böylece izinli kaynak üzerinden başka hosta kaçış olmaz.
       for (let redirectCount = 0; redirectCount <= 3; redirectCount++) {
         const upstream = await fetch(currentUrl.href, {
-          method: "GET", redirect: "manual", signal: request.signal,
+          method: "GET",
+          redirect: "manual",
+          signal: request.signal,
           headers: { "Accept": "image/webp,image/*;q=0.8", "User-Agent": "FilmKesifMotoru/1.0" },
           cf: { image: { width: variant.width, fit: "scale-down", quality: variant.quality, format: "webp" } }
         });
         if (upstream.status >= 300 && upstream.status < 400) {
           const location = upstream.headers.get("location");
           try { await upstream.body?.cancel(); } catch {}
-          if (!location || redirectCount === 3) throw new Error("redirect_limit");
+          if (!location || redirectCount === 3) throw new Error("Görsel kaynağı çok fazla yönlendirme yaptı.");
           const nextUrl = new URL(location, currentUrl);
           if (nextUrl.protocol !== "https:" || !isAllowedThumbnailHost(nextUrl.hostname)) {
-            throw new Error(`redirect_blocked:${nextUrl.hostname}`);
+            throw new Error("Görsel kaynağı güvenli olmayan bir adrese yönlendirdi.");
           }
           currentUrl = nextUrl;
           continue;
@@ -86,43 +93,27 @@ async function handleThumbnailRequest(request) {
         transformed = upstream;
         break;
       }
-      if (!transformed) {
-        attempts.push({ width: variant.width, quality: variant.quality, reason: "no_response" });
-        continue;
-      }
-      if (!transformed.ok) {
-        attempts.push({ width: variant.width, quality: variant.quality, reason: "upstream_http", status: transformed.status });
-        try { await transformed.body?.cancel(); } catch {}
-        continue;
-      }
+      if (!transformed || !transformed.ok) continue;
       const contentType = (transformed.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-      if (contentType !== "image/webp") {
-        attempts.push({ width: variant.width, quality: variant.quality, reason: "not_webp", contentType });
-        try { await transformed.body?.cancel(); } catch {}
-        continue;
-      }
+      if (contentType !== "image/webp") { try { await transformed.body?.cancel(); } catch {} continue; }
       const bytes = await transformed.arrayBuffer();
-      if (!bytes.byteLength || bytes.byteLength > THUMB_MAX_BYTES) {
-        attempts.push({ width: variant.width, quality: variant.quality, reason: !bytes.byteLength ? "empty_body" : "over_20kb", bytes: bytes.byteLength });
-        continue;
-      }
+      if (!bytes.byteLength || bytes.byteLength > THUMB_MAX_BYTES) continue;
       return new Response(bytes, {
         status: 200,
         headers: {
-          "Content-Type": "image/webp", "Content-Length": String(bytes.byteLength),
-          "Cache-Control": "public, max-age=86400", "X-Image-Bytes": String(bytes.byteLength),
-          "X-Image-Max-Bytes": String(THUMB_MAX_BYTES), "X-Image-Verified": "1"
+          "Content-Type": "image/webp",
+          "Content-Length": String(bytes.byteLength),
+          "Cache-Control": "public, max-age=86400",
+          "X-Image-Bytes": String(bytes.byteLength),
+          "X-Image-Max-Bytes": String(THUMB_MAX_BYTES),
+          "X-Image-Verified": "1"
         }
       });
     } catch (error) {
-      const reason = String(error?.message || error).slice(0, 180);
-      attempts.push({ width: variant.width, quality: variant.quality, reason: "exception", detail: reason });
-      console.warn("[image-thumbnail] variant failed", variant.width, variant.quality, reason);
+      console.warn("[image-thumbnail] variant failed", variant.width, variant.quality, error?.message || error);
     }
   }
-  return thumbnailError("Görsel 20 KB sınırına indirilemedi; orijinal görsel gösterilmedi.", 422, {
-    diagnostic: { sourceHost: sourceUrl.hostname, attempts }
-  });
+  return thumbnailError("Görsel 20 KB sınırına indirilemedi; orijinal görsel gösterilmedi.", 422);
 }
 
 async function requireAdminEither(env, request) {
@@ -152,6 +143,35 @@ async function handleRequest(request, env, ctx) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   const _u = new URL(request.url);
   const path = _u.pathname;
+
+  // Vercel/Cloudflare ortak, gizli görev kuyruğu tetikleyicisi.
+  // Yalnızca TASK_RUNNER_SECRET bilen sunucu çağrıları kullanabilir.
+  if (path === "/internal/run-admin-tasks") {
+    if (request.method !== "POST") return jsonError("POST gerekli.", 405);
+    const secret = String(env.TASK_RUNNER_SECRET || "");
+    const supplied = String(request.headers.get("authorization") || "");
+    if (!secret || supplied !== `Bearer ${secret}`) return jsonError("Yetkisiz.", 401);
+    if (!env.DB) return jsonError("Test veritabanına bağlanılamadı.", 503);
+    try {
+      const result = await processAdminTaskQueue(env, 1);
+      // Bir öğe işlendi ise yeni bir Vercel Function çağrısı başlat.
+      // Her çağrı kendi 300 saniyelik süresini kullanır; öğeler Turso'da kalıcıdır.
+      if (result.processed >= 1 && typeof ctx?.waitUntil === "function") {
+        const nextUrl = new URL("/internal/run-admin-tasks", request.url);
+        const continuation = fetch(nextUrl, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${secret}` }
+        }).then(response => {
+          if (!response.ok) throw new Error(`Görev devam çağrısı HTTP ${response.status}`);
+        }).catch(error => console.error("[admin-task-continuation]", error?.stack || error));
+        ctx.waitUntil(continuation);
+      }
+      return response({ ok: true, ...result, environment: "test" });
+    } catch (error) {
+      console.error("[admin-task-runner]", error?.stack || error);
+      return jsonError("Görev kuyruğu çalıştırılamadı.", 500);
+    }
+  }
   const dbRequired =
     path.startsWith("/auth/") ||
     path.startsWith("/user/") ||
@@ -471,8 +491,9 @@ try {
     const appEnv = Object.assign({}, env, { IS_TEST_ENV: true });
     try {
       appEnv.DB = createTursoAdapter(env, true);
-      const result = await processAdminTaskQueue(appEnv, 50);
+      const result = await processAdminTaskQueue(appEnv, 1);
       console.log("[admin-task-queue]", JSON.stringify(result));
+      return result;
     } catch (error) {
       console.error("[admin-task-queue-scheduled]", error?.stack || error);
       throw error;
