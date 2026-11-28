@@ -8,7 +8,7 @@
 
 const PBKDF2_ITER = 100000;
 const SESSION_TTL = 30 * 86400;
-const RECOVER_TTL = 900;
+const RECOVER_TTL = 90;
 const MAX_FAILED_ATTEMPTS = 55;
 const LOCK_DURATION_SEC = 90;
 
