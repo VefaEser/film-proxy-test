@@ -1,8 +1,10 @@
+
 // auth.js — Kayıt/giriş/şifre sıfırlama + güvenlik + permissions döndürme.
 // Faz 3: CORS temizlendi + askıya alınmış kullanıcı oturumu engellendi.
 // Faz 6: /auth/recover/start ve /auth/recover/verify enumeration düzeltmesi
 // Faz 7: Bearer admin token önceliği ve cookie oturumundan ayrıştırma.
 // Faz 8: İzin listeli CORS + credential desteği + tüm auth yanıtlarına CORS.
+// Faz 9: Test ortamı için tek kullanımlık yönetici şifre kurulumu.
 
 const PBKDF2_ITER = 100000;
 const SESSION_TTL = 30 * 86400;
@@ -22,6 +24,11 @@ const ALLOWED_ORIGINS = new Set([
   "https://film-proxy.vercel.app",
 
   // Test
+  "https://vefaeser-kestiktest.static.hf.space",
+  "https://film-proxy-test.vercel.app"
+]);
+
+const TEST_ADMIN_SETUP_ORIGINS = new Set([
   "https://vefaeser-kestiktest.static.hf.space",
   "https://film-proxy-test.vercel.app"
 ]);
@@ -116,10 +123,19 @@ function getCookie(req, name) {
   return null;
 }
 
+// Test ve canlı ortam ayrımı.
+// Node girişlerinde IS_TEST_ENV metin "true" olarak da gelebilir.
+function isTestEnvironment(env) {
+  const value = env?.IS_TEST_ENV;
+
+  return value === true ||
+    String(value || "").toLowerCase() === "true";
+}
+
 // Tek Worker iki HF alan adına hizmet verir.
 // Test ve canlı oturumları ayrıdır.
 function sessionCookieName(env) {
-  return env?.IS_TEST_ENV === true ? "sid_test" : "sid";
+  return isTestEnvironment(env) ? "sid_test" : "sid";
 }
 
 function sessionCookieHeader(token, maxAge, env) {
@@ -536,6 +552,122 @@ async function ensureAdminUser(env) {
   }
 }
 
+// === FAZ 9: Test ortamı tek kullanımlık yönetici şifre kurulumu ===
+
+async function handleAdminSetup(request, env) {
+  if (!isTestEnvironment(env)) {
+    return jsonErr("Bu işlem yalnızca test ortamında kullanılabilir", 404);
+  }
+
+  const origin = request.headers.get("Origin") || "";
+
+  if (!TEST_ADMIN_SETUP_ORIGINS.has(origin)) {
+    return jsonErr("İzin verilmeyen kaynak", 403);
+  }
+
+  if (request.method !== "POST") {
+    return jsonErr("Method not allowed", 405);
+  }
+
+  const ip = request.headers.get("CF-Connecting-IP") || "";
+  const ipLock = await checkIpLock(env, ip);
+
+  if (ipLock.locked) {
+    return jsonErr(
+      "Çok fazla başarısız deneme. Daha sonra tekrar deneyin.",
+      429
+    );
+  }
+
+  let body;
+
+  try {
+    body = await request.json();
+  } catch {
+    return jsonErr("Geçersiz JSON", 400);
+  }
+
+  const suppliedKey = String(body.setupKey || "");
+  const password = String(body.password || "");
+
+  if (
+    !env.ADMIN_SETUP_KEY ||
+    !suppliedKey ||
+    !timingSafeEqualStr(suppliedKey, String(env.ADMIN_SETUP_KEY))
+  ) {
+    await recordIpFailure(env, ip);
+    return jsonErr("Kurulum anahtarı geçersiz", 401);
+  }
+
+  if (password.length < 12) {
+    return jsonErr("Yönetici şifresi en az 12 karakter olmalı", 400);
+  }
+
+  if (password.length > 256) {
+    return jsonErr("Şifre çok uzun", 400);
+  }
+
+  if (!env.DB) {
+    return jsonErr("Veritabanı bağlantısı yok", 503);
+  }
+
+  try {
+    const admin = await ensureAdminUser(env);
+
+    if (!admin || !admin.is_admin || admin.is_suspended) {
+      return jsonErr("Aktif yönetici hesabı bulunamadı", 409);
+    }
+
+    // Yalnızca henüz şifre atanmamış yönetici hesabı kurulabilir.
+    if (!String(admin.password_hash || "").startsWith("ADMIN_NO_LOGIN_")) {
+      return jsonErr("Yönetici şifresi daha önce belirlenmiş", 409);
+    }
+
+    const salt = randomHex(16);
+    const passwordHash = await hashPassword(password, salt);
+    const now = Math.floor(Date.now() / 1000);
+
+    // Koşullu UPDATE, eşzamanlı kurulum isteklerinden yalnızca
+    // birinin şifreyi değiştirebilmesini sağlar.
+    const result = await env.DB.prepare(
+      `UPDATE users
+       SET password_hash = ?,
+           password_salt = ?,
+           updated_at = ?
+       WHERE id = ?
+         AND is_admin = 1
+         AND deleted_at IS NULL
+         AND COALESCE(is_suspended, 0) = 0
+         AND password_hash LIKE 'ADMIN_NO_LOGIN_%'`
+    ).bind(
+      passwordHash,
+      salt,
+      now,
+      admin.id
+    ).run();
+
+    if (Number(result?.meta?.changes || 0) !== 1) {
+      return jsonErr(
+        "Kurulum tamamlanamadı veya şifre daha önce belirlenmiş",
+        409
+      );
+    }
+
+    // Eski oturumları geçersiz kıl.
+    await env.DB.prepare(
+      "DELETE FROM user_sessions WHERE user_id = ?"
+    ).bind(admin.id).run();
+
+    return jsonRes({
+      ok: true,
+      message: "Yönetici şifresi oluşturuldu. Şimdi normal yönetici girişi yapabilirsiniz."
+    });
+  } catch (e) {
+    console.error("admin setup:", e?.message || e);
+    return jsonErr("Yönetici kurulumu sırasında veritabanı hatası", 500);
+  }
+}
+
 // İç auth yönlendiricisi.
 // Yanıtların CORS başlıkları dış handleAuth sarmalayıcısında eklenir.
 async function handleAuthInternal(request, env, ctx) {
@@ -548,6 +680,11 @@ async function handleAuthInternal(request, env, ctx) {
 
   const url = new URL(request.url);
   const path = url.pathname.replace(/^\/auth/, "");
+
+  // Test ortamında ilk yönetici şifresi kurulumu.
+  if (path === "/admin-setup") {
+    return await handleAdminSetup(request, env);
+  }
 
   if (path === "/register" && request.method === "POST") {
     let body;
@@ -1261,4 +1398,4 @@ export async function getCurrentUserWithAdminBridge(env, request) {
   if (sess && sess.is_suspended) return null;
 
   return sess || null;
-    }
+}
