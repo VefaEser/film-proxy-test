@@ -10,7 +10,7 @@ const PBKDF2_ITER = 100000;
 const SESSION_TTL = 30 * 86400;
 const RECOVER_TTL = 900;
 const MAX_FAILED_ATTEMPTS = 55;
-const LOCK_DURATION_SEC = 900;
+const LOCK_DURATION_SEC = 90;
 
 const CORS = {
   "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
